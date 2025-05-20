@@ -5,14 +5,21 @@ services:
   chatbot:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.dev  # Usaremos un Dockerfile específico para desarrollo
     container_name: whatsapp-erp-chatbot
     restart: unless-stopped
     env_file: .env
     volumes:
+      # Montar el código fuente como volumen
+      - ./:/usr/src/app
+      # Excluir node_modules para evitar conflictos con el host
+      - /usr/src/app/node_modules
+      # Conservar las sesiones de WhatsApp y logs entre reinicios
       - ./whatsapp-session:/usr/src/app/whatsapp-session
       - ./logs:/usr/src/app/logs
     network_mode: "host"
+    command: npm run dev  # Ejecutar en modo desarrollo
+
 networks:
   default:
     driver: bridge

@@ -2,11 +2,11 @@ const fetch = require('node-fetch');
 const { logger } = require('../utils/logger');
 
 /**
- * Detecta la intención del mensaje del usuario utilizando Ollama
+ * Detecta las intenciones del mensaje del usuario utilizando Ollama
  * @param {string} message - Mensaje del usuario
- * @returns {Object} - Objeto con la intención detectada y su confianza
+ * @returns {Object} - Objeto con las intenciones detectadas
  */
-const detectIntent = async (message) => {
+const detectIntents = async (message) => {
     try {
         const response = await fetch(`${process.env.OLLAMA_API_URL}/generate`, {
             method: 'POST',
@@ -27,9 +27,9 @@ const detectIntent = async (message) => {
         const data = await response.json();
         return parseIntentResponse(data.response);
     } catch (error) {
-        logger.error(`Error al detectar intención: ${error.message}`);
-        // Devolver una intención por defecto en caso de error
-        return { name: 'desconocida', confidence: 0 };
+        logger.error(`Error al detectar intenciones: ${error.message}`);
+        // Devolver un array vacío de intenciones en caso de error
+        return { intents: [] };
     }
 };
 
@@ -40,41 +40,41 @@ const detectIntent = async (message) => {
  */
 const createIntentPrompt = (message) => {
     return `
-Analiza el siguiente mensaje de un usuario de WhatsApp y determina su intención.
+Analiza el siguiente mensaje de un usuario de WhatsApp y determina todas las intenciones que contiene.
 
 Mensaje: "${message}"
 
 Posibles intenciones:
-- solicitar_prueba_erp: El usuario quiere probar el sistema ERP
-- solicitar_acceso_crm: El usuario quiere probar el sistema CRM
-- solicitar_acceso_bi: El usuario quiere probar la plataforma de Business Intelligence
-- solicitar_servicio: El usuario quiere probar algún servicio sin especificar cuál
-- quiero_probar_servicio: El usuario expresa interés en probar un servicio
-- saludar: El usuario está saludando o iniciando la conversación
-- ayuda: El usuario está pidiendo ayuda o información
-- informacion_servicios: El usuario quiere información sobre los servicios
-- cuentame_mas: El usuario quiere saber más detalles
-- hablar_con_asesor: El usuario quiere hablar con un asesor humano
-- necesito_persona: El usuario necesita asistencia humana
-- pregunta_sistema: El usuario está haciendo preguntas sobre el sistema o cómo usarlo
-- pregunta_personal: El usuario está haciendo preguntas personales al bot
-- pregunta_fuera_contexto: El usuario está haciendo preguntas no relacionadas con los servicios
-- desconocida: No se puede determinar la intención
+- saludo: El usuario está saludando o iniciando la conversación
+- interes en el servicio: El usuario expresa interés en probar o conocer el servicio
+- confirmacion: El usuario está confirmando o aceptando algo
+- inicio de prueba: El usuario está solicitando comenzar una prueba o proporcionando credenciales
+- agradecimiento: El usuario está agradeciendo por algo
+- soporte tecnico: El usuario está solicitando ayuda técnica
 
-IMPORTANTE: Analiza cuidadosamente el contexto del mensaje. Si el usuario está haciendo una pregunta como "¿Cómo ingreso?" o "¿Cuál es mi nombre?", clasifícala como "pregunta_sistema" o "pregunta_personal" respectivamente, no como "desconocida".
+EJEMPLOS CLAVE:
+1. "hola" -> ["saludo"]
+2. "hola, estoy interesado en la aplicación" -> ["saludo", "interes en el servicio"]
+3. "andres2 4587" -> ["inicio de prueba"]  (Este es un formato de usuario y contraseña)
+4. "gracias por la ayuda" -> ["agradecimiento"]
+5. "tengo problemas para acceder" -> ["soporte tecnico"]
+
+IMPORTANTE: 
+1. Un mensaje puede contener VARIAS intenciones al mismo tiempo
+2. Si el mensaje contiene lo que parece ser un nombre de usuario y una contraseña (como "andres2 4587"), considéralo como "inicio de prueba"
+3. Usa EXACTAMENTE los nombres de intenciones como están escritos arriba
 
 Responde ÚNICAMENTE con el formato JSON:
 {
-  "intent": "nombre_de_la_intencion",
-  "confidence": valor_entre_0_y_1
+  "intents": ["intencion1", "intencion2", ...]
 }
 `;
 };
 
 /**
- * Parsea la respuesta del modelo para extraer la intención
+ * Parsea la respuesta del modelo para extraer las intenciones
  * @param {string} response - Respuesta del modelo
- * @returns {Object} - Objeto con la intención detectada y su confianza
+ * @returns {Object} - Objeto con las intenciones detectadas
  */
 const parseIntentResponse = (response) => {
     try {
@@ -86,14 +86,16 @@ const parseIntentResponse = (response) => {
         
         const jsonResponse = JSON.parse(jsonMatch[0]);
         
-        return {
-            name: jsonResponse.intent,
-            confidence: jsonResponse.confidence
-        };
+        // Asegurarse de que intents sea siempre un array
+        if (!Array.isArray(jsonResponse.intents)) {
+            return { intents: [] };
+        }
+        
+        return { intents: jsonResponse.intents };
     } catch (error) {
         logger.error(`Error al parsear respuesta de intención: ${error.message}`);
-        return { name: 'desconocida', confidence: 0 };
+        return { intents: [] };
     }
 };
 
-module.exports = { detectIntent };
+module.exports = { detectIntents };

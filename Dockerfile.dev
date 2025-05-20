@@ -1,0 +1,69 @@
+# Dockerfile.dev - Optimizado para desarrollo con hot reload
+FROM node:18-slim
+
+# Directorio de trabajo
+WORKDIR /usr/src/app
+
+# Instalar dependencias del sistema necesarias para Puppeteer
+RUN apt-get update && apt-get install -y \
+    gconf-service \
+    libasound2 \
+    libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libc6 \
+    libcairo2 \
+    libcups2 \
+    libdbus-1-3 \
+    libexpat1 \
+    libfontconfig1 \
+    libgcc1 \
+    libgconf-2-4 \
+    libgdk-pixbuf2.0-0 \
+    libglib2.0-0 \
+    libgtk-3-0 \
+    libnspr4 \
+    libpango-1.0-0 \
+    libpangocairo-1.0-0 \
+    libstdc++6 \
+    libx11-6 \
+    libx11-xcb1 \
+    libxcb1 \
+    libxcomposite1 \
+    libxcursor1 \
+    libxdamage1 \
+    libxext6 \
+    libxfixes3 \
+    libxi6 \
+    libxrandr2 \
+    libxrender1 \
+    libxss1 \
+    libxtst6 \
+    ca-certificates \
+    fonts-liberation \
+    libappindicator1 \
+    libnss3 \
+    lsb-release \
+    xdg-utils \
+    wget \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copiar solo los archivos de dependencias para aprovechar la caché de Docker
+COPY package*.json ./
+
+# Instalar dependencias, incluyendo nodemon para hot reloading
+RUN npm install
+# Instalar nodemon globalmente para reinicio automático
+RUN npm install -g nodemon
+
+# Crear directorio para la sesión de WhatsApp
+RUN mkdir -p whatsapp-session && chmod 777 whatsapp-session
+
+# No copiar el código fuente porque lo montaremos como volumen
+
+# Definir variables de entorno para desarrollo
+ENV NODE_ENV=development
+ENV WHATSAPP_SESSION_DATA_PATH=./whatsapp-session
+
+# Establecer un comando sin argumentos, el comando real se sobrescribirá en docker-compose
+CMD ["npm", "run", "dev"]
