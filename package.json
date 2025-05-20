@@ -1,0 +1,37 @@
+{
+  "name": "whatsapp-erp-chatbot",
+  "version": "1.0.0",
+  "description": "Chatbot de WhatsApp para gestión de acceso a pruebas de ERP",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "init-db": "node scripts/init-db.js",
+    "manage-db": "node scripts/manage-db.js",
+    "list-users": "node scripts/manage-db.js list-users",
+    "db-status": "node scripts/manage-db.js status",
+    "backup-db": "node scripts/backup-db.js",
+    "restore-db": "node scripts/restore-db.js"
+  },
+  "keywords": [
+    "whatsapp",
+    "chatbot",
+    "erp",
+    "mongodb",
+    "ollama"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "bcrypt": "^5.1.1",
+    "dotenv": "^16.3.1",
+    "mongoose": "^8.0.0",
+    "node-fetch": "^2.7.0",
+    "qrcode-terminal": "^0.12.0",
+    "whatsapp-web.js": "^1.23.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  }
+}
