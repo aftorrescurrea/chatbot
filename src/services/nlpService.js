@@ -1,31 +1,30 @@
-const fetch = require('node-fetch');
+/**
+ * Servicio de procesamiento de lenguaje natural
+ * Detecta intenciones en los mensajes de los usuarios
+ */
+
 const { logger } = require('../utils/logger');
+const { intentConfig } = require('../config/promptConfig');
+const promptService = require('./promptService');
 
 /**
- * Detecta las intenciones del mensaje del usuario utilizando Ollama
+ * Detecta las intenciones del mensaje del usuario utilizando el servicio de prompts
  * @param {string} message - Mensaje del usuario
+ * @param {Object} options - Opciones adicionales para la detección de intenciones
  * @returns {Object} - Objeto con las intenciones detectadas
  */
-const detectIntents = async (message) => {
+const detectIntents = async (message, options = {}) => {
     try {
-        const response = await fetch(`${process.env.OLLAMA_API_URL}/generate`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-                model: process.env.OLLAMA_MODEL,
-                prompt: createIntentPrompt(message),
-                stream: false
-            }),
-        });
+        // Configurar variables específicas para este prompt
+        const variables = {
+            supportedIntents: options.supportedIntents || intentConfig.supportedIntents,
+            intentExamples: options.intentExamples || intentConfig.intentExamples,
+            conversationExamples: options.conversationExamples || intentConfig.conversationExamples,
+            serviceType: options.serviceType || 'ERP'
+        };
 
-        if (!response.ok) {
-            throw new Error(`Error en la API de Ollama: ${response.statusText}`);
-        }
-
-        const data = await response.json();
-        return parseIntentResponse(data.response);
+        // Usar el servicio de prompts para detectar intenciones
+        return await promptService.detectIntentions(message, 'intent-detection', variables);
     } catch (error) {
         logger.error(`Error al detectar intenciones: ${error.message}`);
         // Devolver un array vacío de intenciones en caso de error
@@ -34,68 +33,81 @@ const detectIntents = async (message) => {
 };
 
 /**
- * Crea el prompt para la detección de intenciones
- * @param {string} message - Mensaje del usuario
- * @returns {string} - Prompt para el modelo
+ * Ordena las intenciones por prioridad
+ * @param {Array} intents - Array de intenciones detectadas
+ * @returns {Array} - Array de intenciones ordenadas por prioridad
  */
-const createIntentPrompt = (message) => {
-    return `
-Analiza el siguiente mensaje de un usuario de WhatsApp y determina todas las intenciones que contiene.
+const prioritizeIntents = (intents) => {
+    // Definir prioridad para las intenciones (menor número = mayor prioridad)
+    const priorities = {
+        'solicitud_prueba': 1,
+        'soporte_tecnico': 2,
+        'consulta_precio': 3,
+        'consulta_caracteristicas': 4,
+        'interes_en_servicio': 5,
+        'queja': 6,
+        'cancelacion': 7,
+        'confirmacion': 8,
+        'agradecimiento': 9,
+        'saludo': 10,
+        'despedida': 11
+    };
 
-Mensaje: "${message}"
-
-Posibles intenciones:
-- saludo: El usuario está saludando o iniciando la conversación
-- interes en el servicio: El usuario expresa interés en probar o conocer el servicio
-- confirmacion: El usuario está confirmando o aceptando algo
-- inicio de prueba: El usuario está solicitando comenzar una prueba o proporcionando credenciales
-- agradecimiento: El usuario está agradeciendo por algo
-- soporte tecnico: El usuario está solicitando ayuda técnica
-
-EJEMPLOS CLAVE:
-1. "hola" -> ["saludo"]
-2. "hola, estoy interesado en la aplicación" -> ["saludo", "interes en el servicio"]
-3. "andres2 4587" -> ["inicio de prueba"]  (Este es un formato de usuario y contraseña)
-4. "gracias por la ayuda" -> ["agradecimiento"]
-5. "tengo problemas para acceder" -> ["soporte tecnico"]
-
-IMPORTANTE: 
-1. Un mensaje puede contener VARIAS intenciones al mismo tiempo
-2. Si el mensaje contiene lo que parece ser un nombre de usuario y una contraseña (como "andres2 4587"), considéralo como "inicio de prueba"
-3. Usa EXACTAMENTE los nombres de intenciones como están escritos arriba
-
-Responde ÚNICAMENTE con el formato JSON:
-{
-  "intents": ["intencion1", "intencion2", ...]
-}
-`;
+    // Ordenar por prioridad
+    return [...intents].sort((a, b) => {
+        const priorityA = priorities[a] || 100;
+        const priorityB = priorities[b] || 100;
+        return priorityA - priorityB;
+    });
 };
 
 /**
- * Parsea la respuesta del modelo para extraer las intenciones
- * @param {string} response - Respuesta del modelo
- * @returns {Object} - Objeto con las intenciones detectadas
+ * Determina la intención principal del mensaje
+ * @param {Array} intents - Array de intenciones detectadas
+ * @returns {string|null} - Intención principal o null si no hay intenciones
  */
-const parseIntentResponse = (response) => {
+const getPrimaryIntent = (intents) => {
+    if (!intents || intents.length === 0) {
+        return null;
+    }
+
+    const orderedIntents = prioritizeIntents(intents);
+    return orderedIntents[0];
+};
+
+/**
+ * Analiza el sentimiento del mensaje del usuario
+ * @param {string} message - Mensaje del usuario
+ * @returns {Promise<Object>} - Objeto con el sentimiento detectado
+ */
+const analyzeSentiment = async (message) => {
     try {
+        // Usar el servicio de prompts para analizar sentimiento
+        const response = await promptService.queryModel({
+            systemPrompt: promptService.loadTemplate('sentiment-analysis'),
+            userPrompt: message
+        }, {
+            temperature: 0.1
+        });
+
         // Extraer el JSON de la respuesta
         const jsonMatch = response.match(/\{[\s\S]*\}/);
         if (!jsonMatch) {
             throw new Error('No se encontró un formato JSON válido en la respuesta');
         }
         
-        const jsonResponse = JSON.parse(jsonMatch[0]);
-        
-        // Asegurarse de que intents sea siempre un array
-        if (!Array.isArray(jsonResponse.intents)) {
-            return { intents: [] };
-        }
-        
-        return { intents: jsonResponse.intents };
+        return JSON.parse(jsonMatch[0]);
     } catch (error) {
-        logger.error(`Error al parsear respuesta de intención: ${error.message}`);
-        return { intents: [] };
+        logger.error(`Error al analizar sentimiento: ${error.message}`);
+        // Devolver un sentimiento neutral por defecto
+        return { sentiment: 'neutral', intensity: 'baja' };
     }
 };
 
-module.exports = { detectIntents };
+// Exportar funciones
+module.exports = {
+    detectIntents,
+    prioritizeIntents,
+    getPrimaryIntent,
+    analyzeSentiment
+};

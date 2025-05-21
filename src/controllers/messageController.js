@@ -1,10 +1,20 @@
-const { detectIntents } = require('../services/nlpService');
-const { extractEntities } = require('../services/entityService');
-const { createOrUpdateUser, findUserByPhone, findUserByEmail } = require('../services/userService');
-const { generateCredentials, createCredentials } = require('../services/credentialService');
+/**
+ * Controlador para manejo de mensajes de WhatsApp
+ * Procesa los mensajes entrantes y coordina la lógica de negocio
+ */
+
+const { detectIntents, getPrimaryIntent } = require('../services/nlpService');
+const { extractEntities, getMissingUserData } = require('../services/entityService');
+const { generateResponse } = require('../services/responseService');
+const { createOrUpdateUser, findUserByPhone } = require('../services/userService');
+const { createCredentials } = require('../services/credentialService');
 const { saveMessage } = require('../services/conversationService');
 const { logger } = require('../utils/logger');
-const { validateEmail } = require('../utils/validators');
+const { generalConfig } = require('../config/promptConfig');
+
+// Almacenamiento en memoria para el estado de las conversaciones
+// En producción, esto debería estar en una base de datos
+const conversationStates = new Map();
 
 /**
  * Maneja los mensajes entrantes de WhatsApp
@@ -12,374 +22,282 @@ const { validateEmail } = require('../utils/validators');
  * @param {Object} message - Mensaje recibido
  */
 const handleMessage = async (client, message) => {
-    const from = message.from;
-    const body = message.body;
-    
-    logger.info(`Mensaje recibido de ${from}: ${body}`);
-    
-    // Guardar el mensaje en el historial de conversación
-    await saveMessageToHistory(from, body, true);
-    
-    // Extraer entidades del mensaje
-    const extractedEntities = await extractEntities(body);
-    logger.info(`Entidades extraídas: ${JSON.stringify(extractedEntities)}`);
-    
-    // Si se detectó un nombre, actualizar el usuario
-    const nombreEntity = extractedEntities.find(e => e.nombre);
-    if (nombreEntity) {
-        const user = await findUserByPhone(from);
-        if (user) {
-            // Actualizar el nombre del usuario si se detectó uno
-            user.name = nombreEntity.nombre;
+    try {
+        const from = message.from;
+        const body = message.body;
+        
+        logger.info(`Mensaje recibido de ${from}: ${body}`);
+        
+        // Guardar el mensaje en el historial de conversación
+        await saveMessageToHistory(from, body, true);
+        
+        // Buscar usuario existente
+        let user = await findUserByPhone(from);
+        
+        // Obtener el estado actual de la conversación
+        let conversationState = getConversationState(from);
+        
+        // Detectar intenciones del mensaje
+        const { intents } = await detectIntents(body);
+        logger.info(`Intenciones detectadas: ${JSON.stringify(intents)}`);
+        
+        // Extraer entidades del mensaje
+        const entities = await extractEntities(body);
+        logger.info(`Entidades extraídas: ${JSON.stringify(entities)}`);
+        
+        // Si se detectó un nombre, actualizar el usuario si existe
+        if (entities.nombre && user) {
+            user.name = entities.nombre;
             await user.save();
-            logger.info(`Nombre de usuario actualizado: ${from} -> ${nombreEntity.nombre}`);
+            logger.info(`Nombre de usuario actualizado: ${from} -> ${entities.nombre}`);
+        }
+        
+        // Crear usuario si no existe y se detectaron entidades suficientes
+        if (!user && entities.nombre && (entities.email || entities.telefono)) {
+            user = await createOrUpdateUser({
+                phone: from,
+                name: entities.nombre,
+                email: entities.email || `${from.replace(/\D/g, '')}@temp.com`, // Email temporal basado en el teléfono
+                company: entities.empresa || null,
+                position: entities.cargo || null,
+            });
+            logger.info(`Nuevo usuario creado: ${user._id} (${entities.nombre})`);
+        }
+        
+        // Preparar el contexto de la conversación para la respuesta
+        const conversationContext = {
+            conversationState: conversationState ? conversationState.state : null,
+            currentStep: conversationState ? conversationState.currentStep : 0,
+            missingInfo: conversationState ? conversationState.missingInfo : [],
+            collectedData: conversationState ? conversationState.collectedData : {},
+            conversationHistory: [] // Aquí se podría cargar historial desde la base de datos si es necesario
+        };
+        
+        // Procesar intenciones y actualizar estado de la conversación
+        await processIntents(intents, entities, user, from, conversationContext);
+        
+        // Generar respuesta basada en las intenciones, entidades y contexto
+        const response = await generateResponse(
+            body,
+            intents,
+            entities,
+            user,
+            conversationContext
+        );
+        
+        // Enviar respuesta al usuario
+        await client.sendMessage(from, response);
+        
+        // Guardar la respuesta en el historial
+        await saveMessageToHistory(from, response, false);
+        
+        // Actualizar estado de la conversación según la respuesta y entidades
+        await updateConversationState(from, intents, entities, conversationContext, response);
+        
+    } catch (error) {
+        logger.error(`Error al procesar mensaje: ${error.message}`);
+        logger.error(error.stack);
+        
+        try {
+            // Intentar enviar un mensaje de error genérico
+            await message.reply('Lo siento, ocurrió un error al procesar tu solicitud. Por favor, intenta nuevamente más tarde.');
+        } catch (replyError) {
+            logger.error(`No se pudo enviar mensaje de error: ${replyError.message}`);
         }
     }
-    
-    // Obtener el estado de la conversación del usuario (si existe)
-    const userState = await getUserState(from);
-    
-    // Si el usuario está en medio de un flujo de conversación, continuar ese flujo
-    if (userState && userState.conversationState) {
-        await continueConversationFlow(client, message, userState, extractedEntities);
+};
+
+/**
+ * Procesa las intenciones detectadas y actualiza el estado de la conversación
+ * @param {Array} intents - Intenciones detectadas
+ * @param {Object} entities - Entidades extraídas
+ * @param {Object} user - Usuario (si existe)
+ * @param {string} phoneNumber - Número de teléfono del usuario
+ * @param {Object} conversationContext - Contexto de la conversación
+ */
+const processIntents = async (intents, entities, user, phoneNumber, conversationContext) => {
+    // Si no hay intenciones o ya hay un flujo en curso, no iniciar uno nuevo
+    if (!intents.length || conversationContext.conversationState) {
         return;
     }
     
-    // Detectar intenciones del mensaje
-    const { intents } = await detectIntents(body);
-    logger.info(`Intenciones detectadas: ${JSON.stringify(intents)}`);
+    // Obtener la intención principal
+    const primaryIntent = getPrimaryIntent(intents);
     
-    // Construir respuesta basada en las intenciones y entidades detectadas
-    const response = await constructResponse(intents, extractedEntities, from);
-    
-    // Enviar respuesta al usuario
-    await client.sendMessage(from, response);
-    
-    // Guardar la respuesta en el historial
-    await saveMessageToHistory(from, response, false);
-    
-    // Iniciar flujo de conversación si es necesario
-    if (intents.includes('inicio de prueba') && needsMoreInfo(extractedEntities)) {
-        await startTrialFlow(client, message, convertEntitiesToObject(extractedEntities));
+    // Iniciar flujo según la intención principal
+    switch (primaryIntent) {
+        case 'solicitud_prueba':
+            await startTrialRequestFlow(entities, user, phoneNumber, conversationContext);
+            break;
+            
+        case 'soporte_tecnico':
+            await startSupportFlow(entities, user, phoneNumber, conversationContext);
+            break;
+            
+        // Podrían agregarse más flujos para otras intenciones
     }
 };
 
 /**
- * Convierte un array de entidades a un objeto simple
- * @param {Array} entitiesArray - Array de entidades
- * @returns {Object} - Objeto con las entidades
+ * Inicia el flujo de solicitud de prueba
+ * @param {Object} entities - Entidades extraídas
+ * @param {Object} user - Usuario (si existe)
+ * @param {string} phoneNumber - Número de teléfono del usuario
+ * @param {Object} conversationContext - Contexto de la conversación
  */
-const convertEntitiesToObject = (entitiesArray) => {
-    const entitiesObj = {
-        nombre: null,
-        usuario: null,
-        clave: null
-    };
+const startTrialRequestFlow = async (entities, user, phoneNumber, conversationContext) => {
+    // Verificar si ya tenemos toda la información necesaria
+    const missingFields = getMissingUserData(entities, user);
     
-    entitiesArray.forEach(entity => {
-        if ('nombre' in entity) entitiesObj.nombre = entity.nombre;
-        if ('usuario' in entity) entitiesObj.usuario = entity.usuario;
-        if ('clave' in entity) entitiesObj.clave = entity.clave;
+    // Si no falta información, no es necesario iniciar un flujo
+    if (missingFields.length === 0) {
+        return;
+    }
+    
+    // Iniciar flujo de solicitud de prueba
+    setConversationState(phoneNumber, {
+        state: 'trial_request',
+        currentStep: 0,
+        missingInfo: missingFields,
+        collectedData: {
+            ...entities,
+            // Incluir datos del usuario si existe
+            ...(user ? {
+                nombre: user.name,
+                email: user.email,
+            } : {})
+        },
+        startTime: new Date()
     });
     
-    return entitiesObj;
+    // Actualizar el contexto de conversación
+    conversationContext.conversationState = 'trial_request';
+    conversationContext.currentStep = 0;
+    conversationContext.missingInfo = missingFields;
+    conversationContext.collectedData = entities;
 };
 
 /**
- * Verifica si se necesita más información para completar una solicitud
- * @param {Array} entitiesArray - Array de entidades extraídas
- * @returns {boolean} - true si se necesita más información
+ * Inicia el flujo de soporte técnico
+ * @param {Object} entities - Entidades extraídas
+ * @param {Object} user - Usuario (si existe)
+ * @param {string} phoneNumber - Número de teléfono del usuario
+ * @param {Object} conversationContext - Contexto de la conversación
  */
-const needsMoreInfo = (entitiesArray) => {
-    const entities = convertEntitiesToObject(entitiesArray);
-    // Verificar si falta información esencial para comenzar una prueba
-    return !entities.nombre || !entities.usuario || !entities.clave;
+const startSupportFlow = async (entities, user, phoneNumber, conversationContext) => {
+    // Iniciar flujo de soporte técnico
+    setConversationState(phoneNumber, {
+        state: 'support_request',
+        currentStep: 0,
+        issueDescription: entities.problema || '',
+        reportedFeature: entities.caracteristica || '',
+        collectedData: entities,
+        startTime: new Date()
+    });
+    
+    // Actualizar el contexto de conversación
+    conversationContext.conversationState = 'support_request';
+    conversationContext.currentStep = 0;
+    conversationContext.collectedData = entities;
 };
 
 /**
- * Construye una respuesta basada en las intenciones y entidades detectadas
+ * Actualiza el estado de la conversación después de enviar una respuesta
+ * @param {string} phoneNumber - Número de teléfono del usuario
  * @param {Array} intents - Intenciones detectadas
- * @param {Array} entitiesArray - Array de entidades extraídas
- * @param {string} userId - ID del usuario
- * @returns {string} - Respuesta construida
+ * @param {Object} entities - Entidades extraídas
+ * @param {Object} conversationContext - Contexto de la conversación
+ * @param {string} response - Respuesta enviada al usuario
  */
-const constructResponse = async (intents, entitiesArray, userId) => {
-    let response = '';
-    
-    // Convertir array de entidades a un formato más fácil de manejar
-    const entities = convertEntitiesToObject(entitiesArray);
-    
-    // Si no se detectaron intenciones, respuesta por defecto
-    if (!intents || intents.length === 0) {
-        return "Disculpa, no he podido entender bien tu mensaje. ¿Podrías ser más específico sobre lo que necesitas?";
+const updateConversationState = async (phoneNumber, intents, entities, conversationContext, response) => {
+    // Si no hay un estado activo, no hay nada que actualizar
+    if (!conversationContext.conversationState) {
+        return;
     }
     
-    // Obtener usuario si existe
-    const user = await findUserByPhone(userId);
-    const userName = user ? user.name : (entities.nombre || "");
+    // Obtener el estado actual
+    const currentState = getConversationState(phoneNumber);
     
-    // Si se detectó un saludo
-    if (intents.includes('saludo')) {
-        response += userName 
-            ? `¡Hola ${userName}! Bienvenido de nuevo a nuestro servicio. `
-            : "¡Hola! Bienvenido a nuestro servicio. ";
+    if (!currentState) {
+        return;
     }
     
-    // Si hay interés en el servicio
-    if (intents.includes('interes en el servicio')) {
-        response += "Me alegra que estés interesado en nuestro servicio. Ofrecemos soluciones de ERP, CRM y Business Intelligence que pueden ayudar a optimizar los procesos de tu empresa. ";
-        
-        if (!intents.includes('inicio de prueba')) {
-            response += "Si quieres comenzar una prueba gratuita, solo dímelo. ";
-        }
-    }
+    // Actualizar datos recolectados con nuevas entidades
+    currentState.collectedData = {
+        ...currentState.collectedData,
+        ...entities
+    };
     
-    // Si se detectó una confirmación
-    if (intents.includes('confirmacion')) {
-        response += "Perfecto, he recibido tu confirmación. ";
+    // Verificar si se ha completado toda la información necesaria
+    if (currentState.state === 'trial_request') {
+        const missingFields = getMissingUserData(currentState.collectedData);
         
-        // Si estamos en contexto de una prueba pero no se ha iniciado explícitamente
-        if (!intents.includes('inicio de prueba') && entities.usuario) {
-            response += `He registrado tu nombre de usuario como "${entities.usuario}". `;
-        }
-    }
-    
-    // Si se está iniciando una prueba
-    if (intents.includes('inicio de prueba')) {
-        response += "Para comenzar tu prueba, necesitaré algunos datos. ";
-        
-        // Verificar qué información ya tenemos
-        let missingInfo = [];
-        if (!entities.nombre && !userName) missingInfo.push("nombre completo");
-        if (!entities.usuario) missingInfo.push("nombre de usuario preferido");
-        if (!entities.clave) missingInfo.push("contraseña");
-        
-        // Si falta información
-        if (missingInfo.length > 0) {
-            response += `Necesito tu ${missingInfo.join(", ")} para configurar tu cuenta. `;
-            
-            // Solicitar específicamente el primer dato faltante
-            if (!entities.nombre && !userName) {
-                response += "¿Cuál es tu nombre completo? ";
-            } else if (!entities.usuario) {
-                response += "¿Qué nombre de usuario te gustaría utilizar? ";
-            } else if (!entities.clave) {
-                response += "¿Qué contraseña deseas usar para tu cuenta? ";
-            }
-        } 
-        // Si tenemos toda la información necesaria
-        else {
-            const name = entities.nombre || userName;
-            response += `Excelente ${name}, tu prueba está lista para comenzar. Te he registrado con el usuario "${entities.usuario}". Podrás acceder al sistema en unos momentos, te enviaré los detalles de acceso por este mismo canal. `;
-        }
-    }
-    
-    // Si hay agradecimiento
-    if (intents.includes('agradecimiento')) {
-        response += userName 
-            ? `¡Es un placer ayudarte, ${userName}! Estamos aquí para lo que necesites. `
-            : "¡De nada! Estamos aquí para ayudarte en lo que necesites. ";
-    }
-    
-    // Si se solicita soporte técnico
-    if (intents.includes('soporte tecnico')) {
-        response += "Entiendo que necesitas asistencia técnica. Nuestro equipo de soporte está disponible de lunes a viernes de 9am a 6pm. ";
-        
-        if (entities.usuario) {
-            response += `Revisaré los problemas asociados con tu usuario "${entities.usuario}". `;
-        } else {
-            response += "¿Puedes darme más detalles sobre el problema que estás experimentando? ";
-        }
-        
-        if (entities.clave) {
-            response += "He notado que has compartido tu contraseña. Por seguridad, te recomendaría cambiarla después de resolver este problema. ";
-        }
-    }
-    
-    // Si se detectó nombre pero no se utilizó en la respuesta y no es un inicio de prueba
-    if (entities.nombre && !response.includes(entities.nombre) && !intents.includes('inicio de prueba')) {
-        response += `Gracias por compartir tu nombre, ${entities.nombre}. He actualizado tu información. `;
-    }
-    
-    return response.trim();
-};
-
-/**
- * Inicia el flujo de conversación para solicitud de prueba
- * @param {Object} client - Cliente de WhatsApp
- * @param {Object} message - Mensaje recibido
- * @param {Object} entities - Entidades ya extraídas
- */
-const startTrialFlow = async (client, message, entities) => {
-    try {
-        // Determinar qué información falta
-        const missingInfo = [];
-        if (!entities.nombre) missingInfo.push('nombre');
-        if (!entities.usuario) missingInfo.push('usuario');
-        if (!entities.clave) missingInfo.push('clave');
-        
-        if (missingInfo.length === 0) {
-            // Si ya tenemos toda la información, no necesitamos iniciar un flujo
-            return;
-        }
-        
-        // Guardar el estado de la conversación
-        await saveUserState(message.from, {
-            conversationState: 'trial_request',
-            entities: entities,
-            missingInfo: missingInfo,
-            currentStep: 0
-        });
-        
-        // Solicitar el primer dato faltante (ya se ha enviado en la respuesta principal)
-    } catch (error) {
-        logger.error(`Error al iniciar flujo de solicitud de prueba: ${error.message}`);
-    }
-};
-
-/**
- * Continúa un flujo de conversación existente
- * @param {Object} client - Cliente de WhatsApp
- * @param {Object} message - Mensaje recibido
- * @param {Object} userState - Estado actual del usuario
- * @param {Array} messageEntities - Entidades extraídas del mensaje actual
- */
-const continueConversationFlow = async (client, message, userState, messageEntities) => {
-    try {
-        const { conversationState, entities, missingInfo, currentStep } = userState;
-        
-        // Solo manejamos el flujo de solicitud de prueba por ahora
-        if (conversationState !== 'trial_request') {
-            return;
-        }
-        
-        // Convertir entidades del mensaje a objeto
-        const entitiesObj = convertEntitiesToObject(messageEntities);
-        
-        // Actualizar entidades con la respuesta del usuario
-        const currentField = missingInfo[currentStep];
-        let fieldValue = null;
-        
-        // Determinar el valor según el campo actual
-        switch (currentField) {
-            case 'nombre':
-                fieldValue = entitiesObj.nombre;
-                break;
-            case 'usuario':
-                fieldValue = entitiesObj.usuario;
-                break;
-            case 'clave':
-                fieldValue = entitiesObj.clave;
-                break;
-        }
-        
-        // Si no se detectó valor o es inválido
-        if (!fieldValue) {
-            // Intentar usar el mensaje completo como valor
-            fieldValue = message.body.trim();
-            
-            // Validar según el tipo de campo
-            if (currentField === 'usuario' && fieldValue.includes(' ')) {
-                const validationMsg = "El nombre de usuario no debe contener espacios. Por favor, intenta de nuevo con un nombre de usuario válido.";
-                await client.sendMessage(message.from, validationMsg);
-                await saveMessageToHistory(message.from, validationMsg, false);
-                return;
-            } else if (currentField === 'clave' && fieldValue.length < 6) {
-                const validationMsg = "La contraseña debe tener al menos 6 caracteres. Por favor, intenta de nuevo con una contraseña más segura.";
-                await client.sendMessage(message.from, validationMsg);
-                await saveMessageToHistory(message.from, validationMsg, false);
-                return;
-            }
-        }
-        
-        // Actualizar entidades
-        entities[currentField] = fieldValue;
-        
-        // Verificar si hay más información por solicitar
-        if (currentStep < missingInfo.length - 1) {
-            // Avanzar al siguiente paso
-            const nextStep = currentStep + 1;
-            const nextField = missingInfo[nextStep];
-            
-            // Actualizar estado del usuario
-            await saveUserState(message.from, {
-                ...userState,
-                entities,
-                currentStep: nextStep
-            });
-            
-            // Solicitar siguiente información
-            let responseMessage = '';
-            switch (nextField) {
-                case 'nombre':
-                    responseMessage = '¡Gracias! Ahora, ¿me podrías decir tu nombre completo?';
-                    break;
-                case 'usuario':
-                    responseMessage = 'Perfecto. Ahora necesito que elijas un nombre de usuario para acceder al sistema. ¿Qué nombre de usuario te gustaría usar?';
-                    break;
-                case 'clave':
-                    responseMessage = 'Excelente. Por último, necesito que establezcas una contraseña para tu cuenta. Debe tener al menos 6 caracteres. ¿Qué contraseña te gustaría usar?';
-                    break;
-            }
-            
-            await client.sendMessage(message.from, responseMessage);
-            await saveMessageToHistory(message.from, responseMessage, false);
-        } else {
-            // Toda la información ha sido recolectada
-            await processTrialRequest(client, message, entities);
+        if (missingFields.length === 0) {
+            // Si tenemos toda la información, procesar la solicitud de prueba
+            await processCompletedTrialRequest(phoneNumber, currentState.collectedData);
             
             // Limpiar el estado de la conversación
-            await clearUserState(message.from);
+            clearConversationState(phoneNumber);
+            return;
         }
-    } catch (error) {
-        logger.error(`Error al continuar flujo de conversación: ${error.message}`);
-        const errorMessage = 'Lo siento, ha ocurrido un error al procesar tu solicitud. ¿Podríamos intentarlo de nuevo?';
-        await client.sendMessage(message.from, errorMessage);
-        await saveMessageToHistory(message.from, errorMessage, false);
+        
+        // Si aún falta información pero hemos avanzado
+        if (entities && Object.keys(entities).length > 0) {
+            // Avanzar al siguiente paso
+            currentState.currentStep++;
+            setConversationState(phoneNumber, currentState);
+        }
+    } else if (currentState.state === 'support_request') {
+        // Lógica para actualizar el flujo de soporte técnico
+        // Por ejemplo, marcar como completado después de recibir descripción detallada
+        
+        if (response.includes("equipo de soporte revisará") || 
+            response.includes("asistencia inmediata")) {
+            // Señales de que el flujo ha terminado
+            clearConversationState(phoneNumber);
+            return;
+        }
+        
+        // Avanzar en el flujo si se recibió información nueva
+        if (entities && Object.keys(entities).length > 0) {
+            currentState.currentStep++;
+            setConversationState(phoneNumber, currentState);
+        }
+    }
+    
+    // Verificar si el flujo ha estado activo por mucho tiempo (timeout)
+    const now = new Date();
+    const flowDuration = (now - new Date(currentState.startTime)) / (1000 * 60); // en minutos
+    
+    if (flowDuration > 30) { // 30 minutos de timeout
+        clearConversationState(phoneNumber);
+        logger.info(`Flujo de ${currentState.state} para ${phoneNumber} expiró por timeout`);
     }
 };
 
 /**
- * Procesa la solicitud de prueba con toda la información necesaria
- * @param {Object} client - Cliente de WhatsApp
- * @param {Object} message - Mensaje recibido
- * @param {Object} entities - Entidades recopiladas
+ * Procesa una solicitud de prueba completa
+ * @param {string} phoneNumber - Número de teléfono del usuario
+ * @param {Object} data - Datos recopilados durante el flujo
  */
-const processTrialRequest = async (client, message, entities) => {
+const processCompletedTrialRequest = async (phoneNumber, data) => {
     try {
-        // Crear o actualizar usuario en la base de datos
+        // Crear o actualizar usuario con los datos completos
         const user = await createOrUpdateUser({
-            phone: message.from,
-            name: entities.nombre,
-            email: `${entities.usuario}@temp.com` // Email temporal basado en el usuario
+            phone: phoneNumber,
+            name: data.nombre,
+            email: data.email || `${phoneNumber.replace(/\D/g, '')}@temp.com`,
+            company: data.empresa || null,
+            position: data.cargo || null,
         });
         
-        // Crear credenciales con los datos proporcionados por el usuario
-        await createCredentials(user, entities.usuario, entities.clave, 'erp');
+        // Crear credenciales para el usuario
+        await createCredentials(user, data.usuario, data.clave, 'erp');
         
-        // Enviar mensaje de confirmación
-        const confirmationMessage = `
-¡Felicidades ${entities.nombre}! 🎉 Tu cuenta de prueba ha sido creada exitosamente.
-
-Aquí están tus datos de acceso:
-👤 Usuario: ${entities.usuario}
-🔐 Contraseña: ${entities.clave}
-
-Puedes comenzar a usar el servicio inmediatamente en:
-https://erp-demo.ejemplo.com/login
-
-Tu cuenta estará activa durante 7 días. Si tienes alguna duda, solo escríbeme y estaré encantado de ayudarte.
-
-¡Disfruta de tu experiencia!
-        `;
-        
-        await client.sendMessage(message.from, confirmationMessage);
-        await saveMessageToHistory(message.from, confirmationMessage, false);
+        logger.info(`Solicitud de prueba completada para usuario: ${user._id} (${data.nombre})`);
     } catch (error) {
         logger.error(`Error al procesar solicitud de prueba: ${error.message}`);
-        const errorMessage = 'Lo siento, ha ocurrido un error al crear tu cuenta de prueba. Por favor, intenta nuevamente más tarde.';
-        await client.sendMessage(message.from, errorMessage);
-        await saveMessageToHistory(message.from, errorMessage, false);
+        throw error; // Propagar el error para manejo adecuado
     }
 };
 
@@ -399,7 +317,7 @@ const saveMessageToHistory = async (phone, message, isFromUser) => {
             user = await createOrUpdateUser({
                 phone: phone,
                 name: 'Usuario',  // Nombre temporal
-                email: `${phone.replace(/[^0-9]/g, '')}@temp.com`  // Email temporal
+                email: `${phone.replace(/\D/g, '')}@temp.com`  // Email temporal
             });
         }
         
@@ -414,23 +332,37 @@ const saveMessageToHistory = async (phone, message, isFromUser) => {
     }
 };
 
-// Funciones para manejar el estado de la conversación
-const userStates = {};
-
-const getUserState = async (userId) => {
-    return userStates[userId];
+/**
+ * Obtiene el estado actual de la conversación
+ * @param {string} phoneNumber - Número de teléfono del usuario
+ * @returns {Object|null} - Estado de la conversación o null
+ */
+const getConversationState = (phoneNumber) => {
+    return conversationStates.get(phoneNumber) || null;
 };
 
-const saveUserState = async (userId, state) => {
-    userStates[userId] = state;
+/**
+ * Establece el estado de la conversación
+ * @param {string} phoneNumber - Número de teléfono del usuario
+ * @param {Object} state - Estado de la conversación a establecer
+ */
+const setConversationState = (phoneNumber, state) => {
+    conversationStates.set(phoneNumber, state);
 };
 
-const clearUserState = async (userId) => {
-    delete userStates[userId];
+/**
+ * Limpia el estado de la conversación
+ * @param {string} phoneNumber - Número de teléfono del usuario
+ */
+const clearConversationState = (phoneNumber) => {
+    conversationStates.delete(phoneNumber);
 };
 
+// Exportar funciones
 module.exports = {
     handleMessage,
-    constructResponse,
-    saveMessageToHistory
+    saveMessageToHistory,
+    getConversationState,
+    setConversationState,
+    clearConversationState
 };

@@ -1,107 +1,150 @@
-const fetch = require('node-fetch');
+/**
+ * Servicio de extracción de entidades
+ * Extrae entidades relevantes de los mensajes de los usuarios
+ */
+
 const { logger } = require('../utils/logger');
+const { entityConfig } = require('../config/promptConfig');
+const promptService = require('./promptService');
+const { validateEmail, validatePhone } = require('../utils/validators');
 
 /**
- * Extrae entidades relevantes del mensaje del usuario utilizando Ollama
+ * Extrae entidades relevantes del mensaje del usuario
  * @param {string} message - Mensaje del usuario
+ * @param {Object} options - Opciones adicionales para la extracción de entidades
  * @returns {Object} - Objeto con las entidades extraídas
  */
-const extractEntities = async (message) => {
+const extractEntities = async (message, options = {}) => {
     try {
-        const response = await fetch(`${process.env.OLLAMA_API_URL}/generate`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-                model: process.env.OLLAMA_MODEL,
-                prompt: createEntityExtractionPrompt(message),
-                stream: false
-            }),
-        });
+        // Configurar variables específicas para este prompt
+        const variables = {
+            supportedEntities: options.supportedEntities || entityConfig.supportedEntities,
+            entityExamples: options.entityExamples || entityConfig.entityExamples,
+            complexExamples: options.complexExamples || entityConfig.complexExamples,
+            serviceType: options.serviceType || 'ERP'
+        };
 
-        if (!response.ok) {
-            throw new Error(`Error en la API de Ollama: ${response.statusText}`);
-        }
-
-        const data = await response.json();
-        return parseEntityResponse(data.response);
+        // Usar el servicio de prompts para extraer entidades
+        const entities = await promptService.extractEntities(message, 'entity-extraction', variables);
+        
+        // Validar y normalizar entidades
+        return validateAndNormalizeEntities(entities);
     } catch (error) {
         logger.error(`Error al extraer entidades: ${error.message}`);
         // Devolver un objeto vacío en caso de error
-        return {
-            nombre: null,
-            usuario: null,
-            clave: null
-        };
+        return {};
     }
 };
 
 /**
- * Crea el prompt para la extracción de entidades
+ * Valida y normaliza las entidades extraídas
+ * @param {Object} entities - Entidades extraídas
+ * @returns {Object} - Entidades validadas y normalizadas
+ */
+const validateAndNormalizeEntities = (entities) => {
+    const validatedEntities = { ...entities };
+    
+    // Validar y normalizar email
+    if (validatedEntities.email) {
+        if (!validateEmail(validatedEntities.email)) {
+            logger.warn(`Email extraído inválido: ${validatedEntities.email}`);
+            delete validatedEntities.email;
+        } else {
+            validatedEntities.email = validatedEntities.email.toLowerCase().trim();
+        }
+    }
+    
+    // Validar y normalizar teléfono
+    if (validatedEntities.telefono) {
+        if (!validatePhone(validatedEntities.telefono)) {
+            logger.warn(`Teléfono extraído inválido: ${validatedEntities.telefono}`);
+            delete validatedEntities.telefono;
+        } else {
+            // Normalizar formato de teléfono (eliminar caracteres no numéricos)
+            validatedEntities.telefono = validatedEntities.telefono.replace(/\D/g, '');
+        }
+    }
+    
+    // Normalizar nombre
+    if (validatedEntities.nombre) {
+        // Capitalizar primera letra de cada palabra
+        validatedEntities.nombre = validatedEntities.nombre
+            .split(' ')
+            .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+            .join(' ')
+            .trim();
+    }
+    
+    // Normalizar empresa
+    if (validatedEntities.empresa) {
+        validatedEntities.empresa = validatedEntities.empresa.trim();
+    }
+    
+    // Normalizar usuario
+    if (validatedEntities.usuario) {
+        // Eliminar espacios y caracteres especiales
+        validatedEntities.usuario = validatedEntities.usuario
+            .replace(/[^\w.-]/g, '')
+            .trim();
+    }
+    
+    // No normalizar clave para mantener seguridad
+    
+    return validatedEntities;
+};
+
+/**
+ * Determina qué información falta para completar un registro de usuario
+ * @param {Object} entities - Entidades extraídas
+ * @param {Object} userData - Datos del usuario existente (opcional)
+ * @returns {Array} - Lista de campos faltantes
+ */
+const getMissingUserData = (entities, userData = null) => {
+    const missingFields = [];
+    
+    // Combinar datos existentes con entidades extraídas
+    const combinedData = {
+        ...userData,
+        ...entities
+    };
+    
+    // Verificar campos obligatorios
+    if (!combinedData.nombre) missingFields.push('nombre');
+    if (!combinedData.email) missingFields.push('email');
+    if (!combinedData.usuario) missingFields.push('usuario');
+    if (!combinedData.clave) missingFields.push('clave');
+    
+    return missingFields;
+};
+
+/**
+ * Extrae credenciales del mensaje del usuario
  * @param {string} message - Mensaje del usuario
- * @returns {string} - Prompt para el modelo
+ * @returns {Object} - Objeto con usuario y clave extraídos
  */
-const createEntityExtractionPrompt = (message) => {
-    return `
-Analiza el siguiente mensaje de un usuario de WhatsApp y extrae las entidades relevantes.
-
-Mensaje: "${message}"
-
-Entidades a extraer:
-- nombre: El nombre completo de la persona.
-- usuario: El nombre de usuario o identificador que menciona el usuario.
-- clave: La contraseña o clave que menciona el usuario.
-
-EJEMPLOS CLAVE:
-1. "Mi nombre es Juan Pérez" -> [{"nombre": "Juan Pérez"}]
-2. "Mi usuario será jperez" -> [{"usuario": "jperez"}]
-3. "Mi clave es abc123" -> [{"clave": "abc123"}]
-4. "andres2 4587" -> [{"usuario": "andres2"}, {"clave": "4587"}]
-
-REGLAS IMPORTANTES:
-1. Si el mensaje contiene dos palabras separadas y la segunda parece ser numérica o una posible contraseña, interpreta la primera como "usuario" y la segunda como "clave".
-2. Devuelve un array vacío si no encuentras ninguna entidad.
-3. Incluye solo las entidades que encuentres, no incluyas entidades con valores nulos.
-
-Responde ÚNICAMENTE con un array de objetos en formato JSON:
-[]
-o
-[{"nombre": "valor"}, {"usuario": "valor"}, {"clave": "valor"}]
-
-Solo incluye las entidades que realmente encontraste.
-`;
-};
-
-/**
- * Parsea la respuesta del modelo para extraer las entidades
- * @param {string} response - Respuesta del modelo
- * @returns {Array} - Array de entidades extraídas
- */
-
-const parseEntityResponse = (response) => {
+const extractCredentials = (message) => {
     try {
-        // Extraer el JSON de la respuesta
-        const jsonMatch = response.match(/\[[\s\S]*\]/);
-        if (!jsonMatch) {
-            logger.error(`No se encontró un formato JSON de array válido en la respuesta: ${response}`);
-            return [];
+        // Patrón simple: dos palabras separadas por espacio
+        const parts = message.trim().split(/\s+/);
+        
+        if (parts.length === 2) {
+            return {
+                usuario: parts[0],
+                clave: parts[1]
+            };
         }
         
-        const entities = JSON.parse(jsonMatch[0]);
-        
-        // Validar que sea un array
-        if (!Array.isArray(entities)) {
-            logger.error(`La respuesta no es un array: ${response}`);
-            return [];
-        }
-        
-        return entities;
+        return {};
     } catch (error) {
-        logger.error(`Error al parsear respuesta de entidades: ${error.message}`);
-        logger.error(`Respuesta original: ${response}`);
-        return [];
+        logger.error(`Error al extraer credenciales: ${error.message}`);
+        return {};
     }
 };
 
-module.exports = { extractEntities };
+// Exportar funciones
+module.exports = {
+    extractEntities,
+    validateAndNormalizeEntities,
+    getMissingUserData,
+    extractCredentials
+};
