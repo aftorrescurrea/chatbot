@@ -1,16 +1,17 @@
 /**
- * Servicio de prompts para el chatbot de WhatsApp ERP
- * Maneja la comunicación con Ollama para detección de intenciones y extracción de entidades
+ * Servicio de prompts mejorado para el chatbot de WhatsApp ERP
+ * Incluye capacidades contextuales para mejor comprensión conversacional
  */
 
 const fetch = require('node-fetch');
 const { logger } = require('../utils/logger');
+const { renderTemplate } = require('../utils/promptTemplates');
 
 // Configuración del servicio
 const CONFIG = {
     maxRetries: 3,
     retryDelay: 2000, // 2 segundos
-    timeout: 3000000, // 30 segundos
+    timeout: 30000, // 30 segundos
     temperature: 0.2,
     topP: 0.9,
     topK: 40
@@ -124,48 +125,20 @@ async function queryModel(promptData, options = {}) {
 }
 
 /**
- * Detecta las intenciones presentes en el mensaje del usuario
+ * Detecta las intenciones presentes en el mensaje del usuario (sin contexto)
  * @param {string} message - Mensaje del usuario
+ * @param {string} templateName - Nombre de la plantilla a usar
+ * @param {Object} variables - Variables para la plantilla
  * @param {Object} options - Opciones adicionales
  * @returns {Promise<Object>} - Objeto con las intenciones detectadas
  */
-async function detectIntentions(message, options = {}) {
+async function detectIntentions(message, templateName = 'intent-detection', variables = {}, options = {}) {
     try {
-        const systemPrompt = `Eres un especialista en análisis de intenciones para un chatbot de WhatsApp que ayuda con un sistema ERP empresarial.
-
-Analiza el siguiente mensaje del usuario y determina TODAS las intenciones presentes.
-
-INTENCIONES POSIBLES:
-- saludo: El usuario está saludando o iniciando conversación
-- despedida: El usuario se despide o termina la conversación
-- interes_en_servicio: Muestra interés en el servicio ERP o quiere más información
-- solicitud_prueba: Quiere una prueba, demo, acceso de prueba o crear cuenta
-- confirmacion: Está confirmando algo, acepta una propuesta o dice que sí
-- agradecimiento: Está agradeciendo por algo
-- soporte_tecnico: Necesita ayuda técnica, reporta problemas o errores
-- consulta_precio: Pregunta sobre precios, costos, planes o tarifas
-- consulta_caracteristicas: Pregunta sobre funcionalidades, módulos o características
-- queja: Expresa insatisfacción, problemas con el servicio o críticas
-- cancelacion: Quiere cancelar, dar de baja o terminar el servicio
-
-EJEMPLOS:
-- "Hola, me interesa su ERP" → {"intents": ["saludo", "interes_en_servicio"]}
-- "Quiero probar el sistema" → {"intents": ["solicitud_prueba"]}
-- "usuario123 pass456" → {"intents": ["solicitud_prueba"]}
-- "No puedo acceder al sistema" → {"intents": ["soporte_tecnico"]}
-- "¿Cuánto cuesta?" → {"intents": ["consulta_precio"]}
-- "Gracias, hasta luego" → {"intents": ["agradecimiento", "despedida"]}
-- "Sí, mi nombre es Juan" → {"intents": ["confirmacion"]}
-- "¿Qué módulos incluye?" → {"intents": ["consulta_caracteristicas"]}
-
-IMPORTANTE: 
-- Un mensaje puede tener MÚLTIPLES intenciones
-- Responde ÚNICAMENTE con JSON válido
-- Si no detectas ninguna intención clara, devuelve array vacío
-- Usa EXACTAMENTE los nombres de intenciones listados arriba
-
-Formato de respuesta requerido:
-{"intents": ["intencion1", "intencion2"]}`;
+        const systemPrompt = renderTemplate(
+            require('../utils/promptTemplates').baseTemplates[templateName] || 
+            require('../utils/promptTemplates').baseTemplates['intent-detection'],
+            variables
+        );
 
         const response = await queryModel({
             systemPrompt,
@@ -180,45 +153,141 @@ Formato de respuesta requerido:
 }
 
 /**
- * Extrae entidades relevantes del mensaje del usuario
+ * Detecta intenciones considerando el contexto conversacional
  * @param {string} message - Mensaje del usuario
+ * @param {Object} context - Contexto conversacional
+ * @param {string} templateName - Nombre de la plantilla a usar
+ * @param {Object} variables - Variables para la plantilla
+ * @param {Object} options - Opciones adicionales
+ * @returns {Promise<Object>} - Objeto con las intenciones detectadas
+ */
+async function detectIntentionsWithContext(message, context, templateName = 'contextual-intent-detection', variables = {}, options = {}) {
+    try {
+        // Plantilla contextual para detección de intenciones
+        const contextualTemplate = `
+Eres un especialista en análisis de intenciones para un chatbot de WhatsApp que ayuda con un sistema {{serviceType}} empresarial.
+
+### CONTEXTO CONVERSACIONAL ###
+{{#if context.userProfile.isRegistered}}
+Usuario registrado: {{context.userProfile.name}} ({{context.userProfile.email}})
+{{#if context.userProfile.company}}Empresa: {{context.userProfile.company}}{{/if}}
+{{#if context.userProfile.position}}Cargo: {{context.userProfile.position}}{{/if}}
+{{else}}
+Usuario no registrado
+{{/if}}
+
+{{#if context.knownEntities}}
+Información conocida del usuario:
+{{#each context.knownEntities}}
+- {{@key}}: {{this}}
+{{/each}}
+{{/if}}
+
+{{#if context.currentTopic}}
+Tema actual de conversación: {{context.currentTopic}}
+Fuerza del contexto: {{context.contextStrength}}
+{{/if}}
+
+{{#if context.recentMessages}}
+Últimos mensajes de la conversación:
+{{#each context.recentMessages}}
+{{#if this.isFromUser}}Usuario{{else}}Bot{{/if}}: "{{this.message}}"
+{{/each}}
+{{/if}}
+
+{{#if context.recentIntents}}
+Intenciones recientes: {{JSON.stringify context.recentIntents}}
+{{/if}}
+
+{{#if context.topicHistory}}
+Temas previos: {{JSON.stringify context.topicHistory}}
+{{/if}}
+
+### INSTRUCCIONES ###
+Analiza el mensaje actual del usuario considerando TODO el contexto conversacional.
+
+1. Identifica TODAS las intenciones presentes en el mensaje.
+2. Considera si el usuario continúa con el tema actual o cambia de tema.
+3. Si hay ambigüedad, prioriza la coherencia contextual.
+4. Si el usuario confirma algo, considera qué está confirmando según el contexto.
+
+INTENCIONES POSIBLES:
+{{#each supportedIntents}}
+- {{this}}
+{{/each}}
+
+### EJEMPLOS CONTEXTUALES ###
+
+Ejemplo 1 - Continuidad:
+Contexto: Usuario pidió información sobre el ERP, tema actual: service_interest
+Usuario: "Me interesa, ¿cómo puedo probarlo?"
+Análisis: Continúa tema actual + nueva intención solicitud_prueba
+Respuesta: {"intents": ["interes_en_servicio", "solicitud_prueba"]}
+
+Ejemplo 2 - Confirmación contextual:
+Contexto: Bot preguntó "¿Tu nombre es Juan Pérez?", usuario conocido: Juan Pérez
+Usuario: "Sí"
+Análisis: Confirmación del nombre en contexto
+Respuesta: {"intents": ["confirmacion"]}
+
+Ejemplo 3 - Cambio de tema:
+Contexto: Usuario estaba pidiendo prueba, tema actual: trial_request
+Usuario: "Antes de eso, ¿cuánto cuesta?"
+Análisis: Cambio a consulta de precio
+Respuesta: {"intents": ["consulta_precio"]}
+
+### IMPORTANTE ###
+- Considera SIEMPRE el contexto conversacional
+- Si el usuario dice "sí", "correcto", "exacto" → probablemente es confirmación
+- Si continúa el tema actual, incluye intenciones relacionadas
+- Si cambia de tema abruptamente, detecta la nueva intención principal
+- Un mensaje puede tener MÚLTIPLES intenciones simultáneamente
+
+Formato de respuesta requerido:
+{"intents": ["intencion1", "intencion2"]}`;
+
+        const systemPrompt = renderTemplate(contextualTemplate, {
+            ...variables,
+            context: context
+        });
+
+        const response = await queryModel({
+            systemPrompt,
+            userPrompt: message
+        }, options);
+        
+        const result = parseIntentResponse(response);
+        
+        // Agregar información contextual al resultado
+        return {
+            ...result,
+            contextUsed: true,
+            topicContinuity: context.currentTopic ? 
+                result.intents.some(intent => getIntentsForTopic(context.currentTopic).includes(intent)) : 
+                false
+        };
+    } catch (error) {
+        logger.error(`Error al detectar intenciones con contexto: ${error.message}`);
+        // Fallback a detección sin contexto
+        return await detectIntentions(message, 'intent-detection', variables, options);
+    }
+}
+
+/**
+ * Extrae entidades relevantes del mensaje del usuario (sin contexto)
+ * @param {string} message - Mensaje del usuario
+ * @param {string} templateName - Nombre de la plantilla a usar
+ * @param {Object} variables - Variables para la plantilla
  * @param {Object} options - Opciones adicionales
  * @returns {Promise<Object>} - Objeto con las entidades extraídas
  */
-async function extractEntities(message, options = {}) {
+async function extractEntities(message, templateName = 'entity-extraction', variables = {}, options = {}) {
     try {
-        const systemPrompt = `Eres un especialista en extracción de entidades para un chatbot empresarial de WhatsApp.
-
-Extrae TODAS las entidades relevantes del mensaje del usuario.
-
-ENTIDADES A BUSCAR:
-- nombre: Nombre completo de la persona (ej: "Juan Pérez", "María González")
-- email: Dirección de correo electrónico (ej: "juan@empresa.com")
-- usuario: Nombre de usuario deseado para el sistema (ej: "jperez2023", "admin_user")
-- clave: Contraseña propuesta (ej: "MiClave123!", "password456")
-- empresa: Nombre de la empresa u organización (ej: "Tecnologías SA", "Mi Empresa")
-- telefono: Número de teléfono (ej: "555-123-4567", "+1 234 567 8900")
-- cargo: Puesto de trabajo o posición (ej: "Gerente", "Director de IT", "Contador")
-- industria: Sector o industria (ej: "manufactura", "retail", "servicios")
-- numero_empleados: Cantidad de empleados (ej: "50", "200 empleados")
-
-EJEMPLOS:
-- "Soy Juan Pérez de Empresa ABC" → {"nombre": "Juan Pérez", "empresa": "Empresa ABC"}
-- "Mi email es juan@test.com" → {"email": "juan@test.com"}
-- "usuario123 pass456" → {"usuario": "usuario123", "clave": "pass456"}
-- "Soy gerente de ventas" → {"cargo": "gerente de ventas"}
-- "Tenemos 150 empleados en manufactura" → {"numero_empleados": "150", "industria": "manufactura"}
-- "Me llamo Ana García, soy directora de IT en TechCorp, mi email es ana@techcorp.com, teléfono 555-1234" → {"nombre": "Ana García", "cargo": "directora de IT", "empresa": "TechCorp", "email": "ana@techcorp.com", "telefono": "555-1234"}
-
-IMPORTANTE:
-- Solo incluye entidades que REALMENTE encuentres en el mensaje
-- No inventes información que no esté presente
-- Responde ÚNICAMENTE con JSON válido
-- Si no encuentras entidades, devuelve objeto vacío {}
-- Mantén los valores exactamente como aparecen en el mensaje
-
-Formato de respuesta requerido:
-{"entidad": "valor"}`;
+        const systemPrompt = renderTemplate(
+            require('../utils/promptTemplates').baseTemplates[templateName] || 
+            require('../utils/promptTemplates').baseTemplates['entity-extraction'],
+            variables
+        );
 
         const response = await queryModel({
             systemPrompt,
@@ -233,15 +302,119 @@ Formato de respuesta requerido:
 }
 
 /**
+ * Extrae entidades considerando el contexto conversacional
+ * @param {string} message - Mensaje del usuario
+ * @param {Object} context - Contexto conversacional
+ * @param {string} templateName - Nombre de la plantilla a usar
+ * @param {Object} variables - Variables para la plantilla
+ * @param {Object} options - Opciones adicionales
+ * @returns {Promise<Object>} - Objeto con las entidades extraídas
+ */
+async function extractEntitiesWithContext(message, context, templateName = 'contextual-entity-extraction', variables = {}, options = {}) {
+    try {
+        // Plantilla contextual para extracción de entidades
+        const contextualTemplate = `
+Eres un especialista en extracción de entidades para un chatbot empresarial de WhatsApp.
+
+### CONTEXTO CONVERSACIONAL ###
+{{#if context.userProfile.isRegistered}}
+Usuario registrado: {{context.userProfile.name}} ({{context.userProfile.email}})
+{{#if context.userProfile.company}}Empresa: {{context.userProfile.company}}{{/if}}
+{{#if context.userProfile.position}}Cargo: {{context.userProfile.position}}{{/if}}
+{{else}}
+Usuario no registrado
+{{/if}}
+
+{{#if context.knownEntities}}
+Entidades ya conocidas del usuario:
+{{#each context.knownEntities}}
+- {{@key}}: {{this}}
+{{/each}}
+{{/if}}
+
+{{#if context.recentMessages}}
+Últimos mensajes de la conversación:
+{{#each context.recentMessages}}
+{{#if this.isFromUser}}Usuario{{else}}Bot{{/if}}: "{{this.message}}"
+{{/each}}
+{{/if}}
+
+### INSTRUCCIONES ###
+Extrae SOLO las entidades nuevas o actualizadas presentes en el mensaje actual.
+
+ENTIDADES A BUSCAR:
+{{#each supportedEntities}}
+- {{this}}
+{{/each}}
+
+### REGLAS ESPECIALES ###
+1. NO repitas entidades que ya están en el contexto a menos que el usuario las esté corrigiendo
+2. Si el usuario dice "mi nombre es..." pero ya conocemos su nombre, considéralo como corrección
+3. Si el usuario confirma información ("sí", "correcto"), NO extraigas entidades a menos que agregue información nueva
+4. Prioriza información explícita sobre implícita
+5. Si hay ambigüedad, no asumas
+
+### EJEMPLOS CONTEXTUALES ###
+
+Ejemplo 1 - Nueva información:
+Contexto conocido: nombre="Juan Pérez"
+Usuario: "Mi email es juan@empresa.com"
+Extraer: {"email": "juan@empresa.com"}
+
+Ejemplo 2 - Confirmación sin nueva info:
+Contexto conocido: nombre="Juan Pérez"
+Usuario: "Sí, ese es mi nombre"
+Extraer: {} (no hay entidades nuevas)
+
+Ejemplo 3 - Corrección:
+Contexto conocido: nombre="Juan Pérez"
+Usuario: "Perdón, mi nombre es Juan Carlos Pérez"
+Extraer: {"nombre": "Juan Carlos Pérez"}
+
+Ejemplo 4 - Credenciales juntas:
+Usuario: "usuario123 MiClave456!"
+Extraer: {"usuario": "usuario123", "clave": "MiClave456!"}
+
+### IMPORTANTE ###
+- Solo incluye entidades que REALMENTE encuentres en el mensaje actual
+- No inventes información que no esté presente
+- Considera el contexto para evitar duplicar información conocida
+- Responde ÚNICAMENTE con JSON válido
+
+Formato de respuesta requerido:
+{"entidad": "valor"}`;
+
+        const systemPrompt = renderTemplate(contextualTemplate, {
+            ...variables,
+            context: context
+        });
+
+        const response = await queryModel({
+            systemPrompt,
+            userPrompt: message
+        }, options);
+        
+        const result = parseEntityResponse(response);
+        
+        return result;
+    } catch (error) {
+        logger.error(`Error al extraer entidades con contexto: ${error.message}`);
+        // Fallback a extracción sin contexto
+        return await extractEntities(message, 'entity-extraction', variables, options);
+    }
+}
+
+/**
  * Genera una respuesta contextual para el usuario
  * @param {string} message - Mensaje original del usuario
  * @param {Array} intents - Intenciones detectadas
  * @param {Object} entities - Entidades extraídas
- * @param {Object} context - Contexto de la conversación
+ * @param {Object} userData - Información del usuario
+ * @param {Object} conversationContext - Contexto de la conversación
  * @param {Object} options - Opciones adicionales
  * @returns {Promise<string>} - Respuesta generada
  */
-async function generateResponse(message, intents, entities, context = {}, options = {}) {
+async function generateResponse(message, intents, entities, userData = null, conversationContext = {}, options = {}) {
     try {
         const systemPrompt = `Eres un asistente virtual profesional de WhatsApp para un sistema ERP empresarial llamado "ERP Demo".
 
@@ -255,8 +428,17 @@ CONTEXTO ACTUAL:
 - Mensaje del usuario: "${message}"
 - Intenciones detectadas: ${JSON.stringify(intents)}
 - Entidades extraídas: ${JSON.stringify(entities)}
-- Usuario existente: ${context.hasUser ? 'Sí' : 'No'}
-- Estado de conversación: ${context.conversationState || 'Ninguno'}
+- Usuario existente: ${userData ? `${userData.name} (${userData.email})` : 'No registrado'}
+- Estado de conversación: ${conversationContext.conversationState || 'Ninguno'}
+- Tema actual: ${conversationContext.currentTopic || 'General'}
+
+${userData ? `
+INFORMACIÓN DEL USUARIO:
+- Nombre: ${userData.name}
+- Email: ${userData.email}
+- Empresa: ${userData.company || 'No especificada'}
+- Cargo: ${userData.position || 'No especificado'}
+` : ''}
 
 CARACTERÍSTICAS DEL ERP:
 - Gestión de inventario
@@ -276,11 +458,16 @@ INSTRUCCIONES:
 6. Si falta información para crear cuenta, pregunta específicamente por lo que falta
 7. Usa un tono profesional pero cercano
 8. No uses emojis excesivos (máximo 1-2 por mensaje)
+9. Si conoces información del usuario, úsala apropiadamente en tu respuesta
+
+MANEJO DE CONFIRMACIONES:
+- Si el usuario confirma ("sí", "correcto", "exacto") y hay un flujo activo, continúa el proceso
+- Si el usuario confirma información personal, agradece y continúa
 
 EJEMPLOS DE RESPUESTAS:
-- Saludo: "¡Hola! Soy el asistente virtual de ERP Demo. ¿En qué puedo ayudarte hoy?"
-- Interés: "Me alegra tu interés en ERP Demo. Nuestro sistema incluye gestión completa de inventario, facturación, contabilidad y más. ¿Te gustaría una prueba gratuita de 7 días?"
-- Solicitud prueba: "Perfecto, puedo crear tu cuenta de prueba. Necesito tu nombre completo, email, y las credenciales que quieres usar. ¿Podrías proporcionarme estos datos?"
+- Saludo: "${userData ? `¡Hola ${userData.name}!` : '¡Hola!'} Soy el asistente virtual de ERP Demo. ¿En qué puedo ayudarte hoy?"
+- Interés: "Me alegra tu interés en ERP Demo${userData && userData.company ? ` para ${userData.company}` : ''}. Nuestro sistema incluye gestión completa de inventario, facturación, contabilidad y más. ¿Te gustaría una prueba gratuita de 7 días?"
+- Solicitud prueba: "Perfecto${userData ? `, ${userData.name}` : ''}. Puedo crear tu cuenta de prueba. ${userData && userData.email ? 'Ya tengo tu información de contacto.' : 'Necesito tu nombre completo y email.'} ¿Qué nombre de usuario y contraseña te gustaría usar?"
 
 Responde de manera natural al mensaje del usuario considerando toda la información proporcionada.`;
 
@@ -297,6 +484,30 @@ Responde de manera natural al mensaje del usuario considerando toda la informaci
         logger.error(`Error al generar respuesta: ${error.message}`);
         return "Lo siento, estoy teniendo problemas técnicos en este momento. Por favor, intenta de nuevo más tarde o contacta a nuestro equipo de soporte.";
     }
+}
+
+/**
+ * Obtiene las intenciones relacionadas con un tema específico
+ * @param {string} topic - Tema actual
+ * @returns {Array} - Intenciones relacionadas
+ */
+function getIntentsForTopic(topic) {
+    const topicIntentMapping = {
+        'trial_request': ['solicitud_prueba', 'confirmacion', 'interes_en_servicio'],
+        'technical_support': ['soporte_tecnico', 'queja'],
+        'pricing_inquiry': ['consulta_precio', 'interes_en_servicio'],
+        'features_inquiry': ['consulta_caracteristicas', 'interes_en_servicio'],
+        'complaint': ['queja', 'soporte_tecnico', 'cancelacion'],
+        'cancellation': ['cancelacion', 'queja'],
+        'service_interest': ['interes_en_servicio', 'consulta_caracteristicas', 'consulta_precio'],
+        'greeting': ['saludo', 'interes_en_servicio'],
+        'farewell': ['despedida', 'agradecimiento'],
+        'gratitude': ['agradecimiento', 'despedida'],
+        'confirmation': ['confirmacion'],
+        'general': ['saludo', 'despedida', 'interes_en_servicio', 'solicitud_prueba', 'confirmacion', 'agradecimiento', 'soporte_tecnico', 'consulta_precio', 'consulta_caracteristicas', 'queja', 'cancelacion']
+    };
+    
+    return topicIntentMapping[topic] || [];
 }
 
 /**
@@ -455,11 +666,14 @@ async function getModelInfo() {
 module.exports = {
     queryModel,
     detectIntentions,
+    detectIntentionsWithContext,
     extractEntities,
+    extractEntitiesWithContext,
     generateResponse,
     parseIntentResponse,
     parseEntityResponse,
     testConnection,
     getModelInfo,
+    getIntentsForTopic,
     CONFIG
 };
