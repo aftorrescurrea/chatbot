@@ -1,208 +1,301 @@
 /**
- * Servicio para la gestión y construcción de prompts
- * Centraliza la lógica de construcción de prompts para diferentes propósitos
+ * Servicio de prompts para el chatbot de WhatsApp ERP
+ * Maneja la comunicación con Ollama para detección de intenciones y extracción de entidades
  */
 
 const fetch = require('node-fetch');
 const { logger } = require('../utils/logger');
-const { generalConfig } = require('../config/promptConfig');
-const { loadTemplate, renderTemplate } = require('../utils/promptTemplates');
+
+// Configuración del servicio
+const CONFIG = {
+    maxRetries: 3,
+    retryDelay: 2000, // 2 segundos
+    timeout: 3000000, // 30 segundos
+    temperature: 0.2,
+    topP: 0.9,
+    topK: 40
+};
 
 /**
- * Envía un prompt al modelo LLM y obtiene la respuesta
- * @param {Object} promptData - Datos del prompt a enviar
- * @param {string} promptData.systemPrompt - Instrucciones del sistema para el modelo
- * @param {string} promptData.userPrompt - Mensaje del usuario
- * @param {string} promptData.assistantPrompt - Mensaje previo del asistente (opcional)
- * @param {Object} options - Opciones adicionales para la llamada a la API
- * @returns {Promise<string>} - Respuesta del modelo
+ * Pausa la ejecución por un tiempo determinado
+ * @param {number} ms - Milisegundos a esperar
+ * @returns {Promise}
  */
-async function queryModel(promptData, options = {}) {
-    try {
-        // Preparar los mensajes en formato compatible con Ollama
-        const messages = [
-            { role: 'system', content: promptData.systemPrompt }
-        ];
-
-        // Agregar historial de conversación si existe
-        if (promptData.conversationHistory && promptData.conversationHistory.length > 0) {
-            messages.push(...promptData.conversationHistory);
-        }
-
-        // Agregar mensaje del asistente si existe
-        if (promptData.assistantPrompt) {
-            messages.push({ role: 'assistant', content: promptData.assistantPrompt });
-        }
-
-        // Agregar mensaje del usuario
-        messages.push({ role: 'user', content: promptData.userPrompt });
-
-        // Configurar los parámetros del modelo
-        const modelParams = {
-            model: options.model || generalConfig.model,
-            messages: messages,
-            stream: false,
-            temperature: options.temperature !== undefined ? options.temperature : generalConfig.temperature,
-            max_tokens: options.maxTokens || generalConfig.maxTokens
-        };
-
-        logger.debug(`Enviando prompt a Ollama: ${JSON.stringify(modelParams)}`);
-
-        // Enviar el prompt a la API de Ollama
-        const response = await fetch(`${process.env.OLLAMA_API_URL}/chat`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify(modelParams),
-            timeout: (options.maxResponseTime || generalConfig.maxResponseTime) * 1000
-        });
-
-        if (!response.ok) {
-            const errorText = await response.text();
-            throw new Error(`Error en la API de Ollama: ${response.status} ${response.statusText} - ${errorText}`);
-        }
-
-        const data = await response.json();
-        return data.message.content;
-    } catch (error) {
-        logger.error(`Error al consultar el modelo LLM: ${error.message}`);
-        // Si es un error de timeout, proporcionar un mensaje específico
-        if (error.type === 'request-timeout' || error.message.includes('timeout')) {
-            throw new Error(`La respuesta del modelo LLM excedió el tiempo límite de ${options.maxResponseTime || generalConfig.maxResponseTime} segundos.`);
-        }
-        throw error;
-    }
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 /**
- * Construye y envía un prompt para detectar intenciones
- * @param {string} message - Mensaje del usuario
- * @param {string} templateName - Nombre de la plantilla a utilizar (opcional)
- * @param {Object} variables - Variables para renderizar la plantilla (opcional)
- * @returns {Promise<Object>} - Respuesta del modelo con intenciones detectadas
+ * Verifica si el error es debido a que el modelo se está cargando
+ * @param {string} errorMessage - Mensaje de error
+ * @returns {boolean}
  */
-async function detectIntentions(message, templateName = 'intent-detection', variables = {}) {
+function isModelLoadingError(errorMessage) {
+    return errorMessage.includes('llm server loading model') || 
+           errorMessage.includes('model loading') ||
+           errorMessage.includes('server loading') ||
+           errorMessage.includes('loading');
+}
+
+/**
+ * Consulta al modelo LLM usando la API de generate de Ollama
+ * @param {Object} promptData - Datos del prompt
+ * @param {string} promptData.systemPrompt - Instrucciones del sistema
+ * @param {string} promptData.userPrompt - Mensaje del usuario
+ * @param {Object} options - Opciones adicionales
+ * @returns {Promise<string>} - Respuesta del modelo
+ */
+async function queryModel(promptData, options = {}) {
+    const maxRetries = options.maxRetries || CONFIG.maxRetries;
+    
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            logger.debug(`Intento ${attempt}/${maxRetries} de consulta al modelo`);
+            
+            // Combinar system prompt y user prompt para API de generate
+            const fullPrompt = promptData.systemPrompt 
+                ? `${promptData.systemPrompt}\n\nUsuario: ${promptData.userPrompt}\nAsistente:`
+                : promptData.userPrompt;
+            
+            const requestBody = {
+                model: process.env.OLLAMA_MODEL || 'llama3:8b',
+                prompt: fullPrompt,
+                stream: false,
+                options: {
+                    temperature: options.temperature || CONFIG.temperature,
+                    top_p: CONFIG.topP,
+                    top_k: CONFIG.topK,
+                    stop: ['\nUsuario:', '\nUser:']
+                }
+            };
+            
+            logger.debug(`Enviando request a: ${process.env.OLLAMA_API_URL}/generate`);
+            
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), CONFIG.timeout);
+            
+            const response = await fetch(`${process.env.OLLAMA_API_URL}/generate`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(requestBody),
+                signal: controller.signal
+            });
+            
+            clearTimeout(timeoutId);
+            
+            if (!response.ok) {
+                const errorText = await response.text();
+                const error = new Error(`Error HTTP ${response.status}: ${errorText}`);
+                
+                // Si es error de modelo cargando y no es el último intento
+                if (isModelLoadingError(errorText) && attempt < maxRetries) {
+                    logger.warn(`Modelo cargando, esperando ${CONFIG.retryDelay * attempt}ms antes del siguiente intento...`);
+                    await sleep(CONFIG.retryDelay * attempt);
+                    continue;
+                }
+                
+                throw error;
+            }
+            
+            const data = await response.json();
+            return data.response || '';
+            
+        } catch (error) {
+            logger.error(`Error en intento ${attempt}/${maxRetries}: ${error.message}`);
+            
+            // Si es el último intento o no es un error recuperable
+            if (attempt === maxRetries || (!isModelLoadingError(error.message) && !error.name === 'AbortError')) {
+                if (error.name === 'AbortError') {
+                    throw new Error(`Timeout: La respuesta del modelo excedió el tiempo límite de ${CONFIG.timeout}ms`);
+                }
+                throw error;
+            }
+            
+            // Esperar antes del siguiente intento con backoff exponencial
+            const delay = CONFIG.retryDelay * Math.pow(2, attempt - 1);
+            logger.info(`Esperando ${delay}ms antes del siguiente intento...`);
+            await sleep(delay);
+        }
+    }
+    
+    throw new Error('Se agotaron todos los intentos de conexión con Ollama');
+}
+
+/**
+ * Detecta las intenciones presentes en el mensaje del usuario
+ * @param {string} message - Mensaje del usuario
+ * @param {Object} options - Opciones adicionales
+ * @returns {Promise<Object>} - Objeto con las intenciones detectadas
+ */
+async function detectIntentions(message, options = {}) {
     try {
-        // Cargar la plantilla base para detección de intenciones
-        const template = loadTemplate(templateName);
-        
-        // Renderizar la plantilla con las variables proporcionadas y el mensaje del usuario
-        const systemPrompt = renderTemplate(template, {
-            ...variables,
-            message
-        });
+        const systemPrompt = `Eres un especialista en análisis de intenciones para un chatbot de WhatsApp que ayuda con un sistema ERP empresarial.
 
-        // Construir el mensaje del usuario (simplemente el mensaje original)
-        const userPrompt = message;
+Analiza el siguiente mensaje del usuario y determina TODAS las intenciones presentes.
 
-        // Enviar el prompt al modelo
+INTENCIONES POSIBLES:
+- saludo: El usuario está saludando o iniciando conversación
+- despedida: El usuario se despide o termina la conversación
+- interes_en_servicio: Muestra interés en el servicio ERP o quiere más información
+- solicitud_prueba: Quiere una prueba, demo, acceso de prueba o crear cuenta
+- confirmacion: Está confirmando algo, acepta una propuesta o dice que sí
+- agradecimiento: Está agradeciendo por algo
+- soporte_tecnico: Necesita ayuda técnica, reporta problemas o errores
+- consulta_precio: Pregunta sobre precios, costos, planes o tarifas
+- consulta_caracteristicas: Pregunta sobre funcionalidades, módulos o características
+- queja: Expresa insatisfacción, problemas con el servicio o críticas
+- cancelacion: Quiere cancelar, dar de baja o terminar el servicio
+
+EJEMPLOS:
+- "Hola, me interesa su ERP" → {"intents": ["saludo", "interes_en_servicio"]}
+- "Quiero probar el sistema" → {"intents": ["solicitud_prueba"]}
+- "usuario123 pass456" → {"intents": ["solicitud_prueba"]}
+- "No puedo acceder al sistema" → {"intents": ["soporte_tecnico"]}
+- "¿Cuánto cuesta?" → {"intents": ["consulta_precio"]}
+- "Gracias, hasta luego" → {"intents": ["agradecimiento", "despedida"]}
+- "Sí, mi nombre es Juan" → {"intents": ["confirmacion"]}
+- "¿Qué módulos incluye?" → {"intents": ["consulta_caracteristicas"]}
+
+IMPORTANTE: 
+- Un mensaje puede tener MÚLTIPLES intenciones
+- Responde ÚNICAMENTE con JSON válido
+- Si no detectas ninguna intención clara, devuelve array vacío
+- Usa EXACTAMENTE los nombres de intenciones listados arriba
+
+Formato de respuesta requerido:
+{"intents": ["intencion1", "intencion2"]}`;
+
         const response = await queryModel({
             systemPrompt,
-            userPrompt
-        }, {
-            temperature: 0.1 // Temperatura baja para resultados más predecibles
-        });
-
-        // Analizar la respuesta para extraer las intenciones detectadas
+            userPrompt: message
+        }, options);
+        
         return parseIntentResponse(response);
     } catch (error) {
         logger.error(`Error al detectar intenciones: ${error.message}`);
-        // En caso de error, devolver un objeto vacío con intenciones
         return { intents: [] };
     }
 }
 
 /**
- * Construye y envía un prompt para extraer entidades
+ * Extrae entidades relevantes del mensaje del usuario
  * @param {string} message - Mensaje del usuario
- * @param {string} templateName - Nombre de la plantilla a utilizar (opcional)
- * @param {Object} variables - Variables para renderizar la plantilla (opcional)
- * @returns {Promise<Object>} - Respuesta del modelo con entidades extraídas
+ * @param {Object} options - Opciones adicionales
+ * @returns {Promise<Object>} - Objeto con las entidades extraídas
  */
-async function extractEntities(message, templateName = 'entity-extraction', variables = {}) {
+async function extractEntities(message, options = {}) {
     try {
-        // Cargar la plantilla base para extracción de entidades
-        const template = loadTemplate(templateName);
-        
-        // Renderizar la plantilla con las variables proporcionadas y el mensaje del usuario
-        const systemPrompt = renderTemplate(template, {
-            ...variables,
-            message
-        });
+        const systemPrompt = `Eres un especialista en extracción de entidades para un chatbot empresarial de WhatsApp.
 
-        // Construir el mensaje del usuario (simplemente el mensaje original)
-        const userPrompt = message;
+Extrae TODAS las entidades relevantes del mensaje del usuario.
 
-        // Enviar el prompt al modelo
+ENTIDADES A BUSCAR:
+- nombre: Nombre completo de la persona (ej: "Juan Pérez", "María González")
+- email: Dirección de correo electrónico (ej: "juan@empresa.com")
+- usuario: Nombre de usuario deseado para el sistema (ej: "jperez2023", "admin_user")
+- clave: Contraseña propuesta (ej: "MiClave123!", "password456")
+- empresa: Nombre de la empresa u organización (ej: "Tecnologías SA", "Mi Empresa")
+- telefono: Número de teléfono (ej: "555-123-4567", "+1 234 567 8900")
+- cargo: Puesto de trabajo o posición (ej: "Gerente", "Director de IT", "Contador")
+- industria: Sector o industria (ej: "manufactura", "retail", "servicios")
+- numero_empleados: Cantidad de empleados (ej: "50", "200 empleados")
+
+EJEMPLOS:
+- "Soy Juan Pérez de Empresa ABC" → {"nombre": "Juan Pérez", "empresa": "Empresa ABC"}
+- "Mi email es juan@test.com" → {"email": "juan@test.com"}
+- "usuario123 pass456" → {"usuario": "usuario123", "clave": "pass456"}
+- "Soy gerente de ventas" → {"cargo": "gerente de ventas"}
+- "Tenemos 150 empleados en manufactura" → {"numero_empleados": "150", "industria": "manufactura"}
+- "Me llamo Ana García, soy directora de IT en TechCorp, mi email es ana@techcorp.com, teléfono 555-1234" → {"nombre": "Ana García", "cargo": "directora de IT", "empresa": "TechCorp", "email": "ana@techcorp.com", "telefono": "555-1234"}
+
+IMPORTANTE:
+- Solo incluye entidades que REALMENTE encuentres en el mensaje
+- No inventes información que no esté presente
+- Responde ÚNICAMENTE con JSON válido
+- Si no encuentras entidades, devuelve objeto vacío {}
+- Mantén los valores exactamente como aparecen en el mensaje
+
+Formato de respuesta requerido:
+{"entidad": "valor"}`;
+
         const response = await queryModel({
             systemPrompt,
-            userPrompt
-        }, {
-            temperature: 0.1 // Temperatura baja para resultados más predecibles
-        });
-
-        // Analizar la respuesta para extraer las entidades
+            userPrompt: message
+        }, options);
+        
         return parseEntityResponse(response);
     } catch (error) {
         logger.error(`Error al extraer entidades: ${error.message}`);
-        // En caso de error, devolver un objeto vacío
         return {};
     }
 }
 
 /**
- * Construye y envía un prompt para generar una respuesta para el usuario final
- * @param {string} message - Mensaje del usuario
+ * Genera una respuesta contextual para el usuario
+ * @param {string} message - Mensaje original del usuario
  * @param {Array} intents - Intenciones detectadas
  * @param {Object} entities - Entidades extraídas
- * @param {Object} userData - Datos del usuario (si está disponible)
- * @param {Object} conversationContext - Contexto de la conversación
- * @param {string} templateName - Nombre de la plantilla a utilizar (opcional)
- * @returns {Promise<string>} - Respuesta generada para el usuario
+ * @param {Object} context - Contexto de la conversación
+ * @param {Object} options - Opciones adicionales
+ * @returns {Promise<string>} - Respuesta generada
  */
-async function generateResponse(message, intents, entities, userData, conversationContext, templateName = 'user-response') {
+async function generateResponse(message, intents, entities, context = {}, options = {}) {
     try {
-        // Cargar la plantilla base para generación de respuestas
-        const template = loadTemplate(templateName);
-        
-        // Renderizar la plantilla con todos los datos relevantes
-        const systemPrompt = renderTemplate(template, {
-            message,
-            intents,
-            entities,
-            userData,
-            context: conversationContext,
-            serviceMetadata: generalConfig.serviceMetadata
-        });
+        const systemPrompt = `Eres un asistente virtual profesional de WhatsApp para un sistema ERP empresarial llamado "ERP Demo".
 
-        // Construir el mensaje del usuario (incluyendo el contexto de la conversación)
-        const userPrompt = `${message}\n\nContexto: ${JSON.stringify({
-            intents, 
-            entities,
-            userData: userData ? {
-                name: userData.name,
-                registrationDate: userData.registrationDate,
-                lastActivity: userData.lastActivity
-            } : null,
-            conversationState: conversationContext.conversationState
-        })}`;
+Tu trabajo es ayudar a los usuarios con:
+- Información sobre el servicio ERP
+- Crear cuentas de prueba gratuitas (7 días)
+- Resolver dudas técnicas básicas
+- Proporcionar información de contacto para soporte avanzado
 
-        // Enviar el prompt al modelo
+CONTEXTO ACTUAL:
+- Mensaje del usuario: "${message}"
+- Intenciones detectadas: ${JSON.stringify(intents)}
+- Entidades extraídas: ${JSON.stringify(entities)}
+- Usuario existente: ${context.hasUser ? 'Sí' : 'No'}
+- Estado de conversación: ${context.conversationState || 'Ninguno'}
+
+CARACTERÍSTICAS DEL ERP:
+- Gestión de inventario
+- Facturación electrónica
+- Contabilidad integrada
+- Recursos humanos
+- Informes en tiempo real
+- Integración con bancos
+- Múltiples usuarios y permisos
+
+INSTRUCCIONES:
+1. Responde de forma amigable y profesional
+2. Sé conciso pero informativo (máximo 3-4 oraciones)
+3. Si el usuario solicita una prueba, guíalo para obtener: nombre, email, usuario deseado y contraseña
+4. Para soporte técnico, solicita más detalles y proporciona contacto: soporte@erp-demo.ejemplo.com
+5. Para precios, menciona que depende del número de usuarios y módulos, y que contacten a ventas@erp-demo.ejemplo.com
+6. Si falta información para crear cuenta, pregunta específicamente por lo que falta
+7. Usa un tono profesional pero cercano
+8. No uses emojis excesivos (máximo 1-2 por mensaje)
+
+EJEMPLOS DE RESPUESTAS:
+- Saludo: "¡Hola! Soy el asistente virtual de ERP Demo. ¿En qué puedo ayudarte hoy?"
+- Interés: "Me alegra tu interés en ERP Demo. Nuestro sistema incluye gestión completa de inventario, facturación, contabilidad y más. ¿Te gustaría una prueba gratuita de 7 días?"
+- Solicitud prueba: "Perfecto, puedo crear tu cuenta de prueba. Necesito tu nombre completo, email, y las credenciales que quieres usar. ¿Podrías proporcionarme estos datos?"
+
+Responde de manera natural al mensaje del usuario considerando toda la información proporcionada.`;
+
         const response = await queryModel({
             systemPrompt,
-            userPrompt,
-            // Incluir histórico de conversación si está disponible
-            conversationHistory: conversationContext.conversationHistory
+            userPrompt: `Genera una respuesta apropiada para este contexto.`
         }, {
+            ...options,
             temperature: 0.7 // Temperatura más alta para respuestas más creativas
         });
-
-        return response;
+        
+        return response.trim();
     } catch (error) {
         logger.error(`Error al generar respuesta: ${error.message}`);
-        // En caso de error, devolver una respuesta genérica
-        return "Lo siento, estoy teniendo problemas para procesar tu solicitud en este momento. Por favor, intenta de nuevo más tarde.";
+        return "Lo siento, estoy teniendo problemas técnicos en este momento. Por favor, intenta de nuevo más tarde o contacta a nuestro equipo de soporte.";
     }
 }
 
@@ -213,22 +306,35 @@ async function generateResponse(message, intents, entities, userData, conversati
  */
 function parseIntentResponse(response) {
     try {
-        // Extraer el JSON de la respuesta
-        const jsonMatch = response.match(/\{[\s\S]*\}/);
+        // Buscar JSON en la respuesta
+        const jsonMatch = response.match(/\{[^}]*"intents"[^}]*\}/);
         if (!jsonMatch) {
-            throw new Error('No se encontró un formato JSON válido en la respuesta');
-        }
-        
-        const jsonResponse = JSON.parse(jsonMatch[0]);
-        
-        // Asegurarse de que intents sea siempre un array
-        if (!Array.isArray(jsonResponse.intents)) {
+            logger.debug(`No se encontró JSON válido en respuesta de intenciones: ${response}`);
             return { intents: [] };
         }
         
-        return { intents: jsonResponse.intents };
+        const parsed = JSON.parse(jsonMatch[0]);
+        
+        // Validar que intents sea un array
+        if (!Array.isArray(parsed.intents)) {
+            logger.warn(`Intents no es un array: ${JSON.stringify(parsed)}`);
+            return { intents: [] };
+        }
+        
+        // Filtrar intenciones válidas
+        const validIntents = [
+            'saludo', 'despedida', 'interes_en_servicio', 'solicitud_prueba', 
+            'confirmacion', 'agradecimiento', 'soporte_tecnico', 'consulta_precio', 
+            'consulta_caracteristicas', 'queja', 'cancelacion'
+        ];
+        
+        const filteredIntents = parsed.intents.filter(intent => 
+            validIntents.includes(intent)
+        );
+        
+        return { intents: filteredIntents };
     } catch (error) {
-        logger.error(`Error al parsear respuesta de intención: ${error.message}`);
+        logger.debug(`Error parseando intenciones: ${error.message}`);
         return { intents: [] };
     }
 }
@@ -240,42 +346,112 @@ function parseIntentResponse(response) {
  */
 function parseEntityResponse(response) {
     try {
-        // Extraer el JSON de la respuesta
-        const jsonMatch = response.match(/\{[\s\S]*\}/);
-        if (!jsonMatch) {
-            logger.error(`No se encontró un formato JSON válido en la respuesta: ${response}`);
+        // Si la respuesta indica explícitamente que no hay entidades
+        if (response.toLowerCase().includes('no se encontraron entidades') || 
+            response.toLowerCase().includes('no hay entidades') ||
+            response.toLowerCase().includes('no entities found') ||
+            response.toLowerCase().includes('objeto vacío')) {
             return {};
         }
         
-        const entities = JSON.parse(jsonMatch[0]);
+        // Buscar JSON en la respuesta
+        const jsonMatch = response.match(/\{[^}]*\}/);
+        if (!jsonMatch) {
+            logger.debug(`No se encontró JSON válido en respuesta de entidades: ${response}`);
+            return {};
+        }
+        
+        const parsed = JSON.parse(jsonMatch[0]);
         
         // Validar que sea un objeto
-        if (typeof entities !== 'object' || entities === null) {
-            logger.error(`La respuesta no es un objeto: ${response}`);
+        if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+            logger.debug(`Respuesta de entidades no es un objeto válido: ${typeof parsed}`);
             return {};
         }
         
-        return entities;
+        // Filtrar solo entidades válidas y limpiar valores
+        const validEntities = [
+            'nombre', 'email', 'usuario', 'clave', 'empresa', 
+            'telefono', 'cargo', 'industria', 'numero_empleados'
+        ];
+        
+        const filtered = {};
+        
+        for (const [key, value] of Object.entries(parsed)) {
+            if (validEntities.includes(key) && value && typeof value === 'string') {
+                const cleanValue = value.trim();
+                if (cleanValue.length > 0) {
+                    filtered[key] = cleanValue;
+                }
+            }
+        }
+        
+        return filtered;
     } catch (error) {
-        logger.error(`Error al parsear respuesta de entidades: ${error.message}`);
-        logger.error(`Respuesta original: ${response}`);
+        logger.debug(`Error parseando entidades (normal si no hay entidades): ${error.message}`);
         return {};
     }
 }
 
 /**
- * Evalúa la calidad de la respuesta del modelo
- * @param {string} response - Respuesta del modelo
- * @param {Object} expectedFormat - Formato esperado de la respuesta
- * @returns {boolean} - Indica si la respuesta cumple con el formato esperado
+ * Prueba la conexión con el servicio de Ollama
+ * @returns {Promise<boolean>} - true si la conexión es exitosa
  */
-function validateResponse(response, expectedFormat) {
-    // Esta función puede implementarse para validar respuestas del modelo
-    // y asegurar que cumplan con el formato esperado
-    return true;
+async function testConnection() {
+    try {
+        logger.info('🔄 Probando conexión con Ollama...');
+        
+        const response = await queryModel({
+            systemPrompt: 'Responde con exactamente estas palabras: "Conexión exitosa"',
+            userPrompt: 'Hola'
+        }, {
+            maxRetries: 1,
+            timeout: 10000
+        });
+        
+        if (response.toLowerCase().includes('conexión exitosa')) {
+            logger.info(`✅ Conexión con Ollama exitosa: ${response.trim()}`);
+            return true;
+        } else {
+            logger.warn(`⚠️ Respuesta inesperada de Ollama: ${response}`);
+            return false;
+        }
+    } catch (error) {
+        logger.error(`❌ Error en prueba de conexión: ${error.message}`);
+        return false;
+    }
 }
 
-// Exportar funciones
+/**
+ * Obtiene información sobre el modelo actual
+ * @returns {Promise<Object>} - Información del modelo
+ */
+async function getModelInfo() {
+    try {
+        const response = await fetch(`${process.env.OLLAMA_API_URL}/show`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: process.env.OLLAMA_MODEL || 'llama3:8b' })
+        });
+        
+        if (response.ok) {
+            const data = await response.json();
+            return {
+                model: data.model,
+                size: data.size,
+                parameters: data.parameters,
+                template: data.template
+            };
+        } else {
+            throw new Error(`Error HTTP ${response.status}`);
+        }
+    } catch (error) {
+        logger.error(`Error obteniendo información del modelo: ${error.message}`);
+        return null;
+    }
+}
+
+// Exportar todas las funciones
 module.exports = {
     queryModel,
     detectIntentions,
@@ -283,5 +459,7 @@ module.exports = {
     generateResponse,
     parseIntentResponse,
     parseEntityResponse,
-    validateResponse
+    testConnection,
+    getModelInfo,
+    CONFIG
 };

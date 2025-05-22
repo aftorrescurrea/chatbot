@@ -6,7 +6,7 @@
 // Configuración general del sistema de prompts
 const generalConfig = {
   // Modelo de Ollama a utilizar
-  model: process.env.OLLAMA_MODEL || 'llama3',
+  model: process.env.OLLAMA_MODEL || 'llama3:8b',
   
   // Temperatura para la generación (0.0-1.0)
   temperature: 0.2,
