@@ -1,6 +1,6 @@
 /**
- * Controlador mejorado para manejo de mensajes de WhatsApp (CORREGIDO)
- * Incluye memoria conversacional y procesamiento contextual
+ * Controlador mejorado para manejo de mensajes de WhatsApp
+ * Incluye memoria conversacional y procesamiento contextual mejorado
  */
 
 const { detectIntentsWithContext, getPrimaryIntentWithContext, detectContextChange } = require('../services/nlpService');
@@ -23,7 +23,7 @@ const { generalConfig } = require('../config/promptConfig');
 const activeFlowStates = new Map();
 
 /**
- * Maneja los mensajes entrantes de WhatsApp con capacidades contextuales
+ * Maneja los mensajes entrantes de WhatsApp con capacidades contextuales mejoradas
  * @param {Object} client - Cliente de WhatsApp
  * @param {Object} message - Mensaje recibido
  */
@@ -42,13 +42,29 @@ const handleMessage = async (client, message) => {
         
         // Detectar intenciones con contexto conversacional
         const intentResult = await detectIntentsWithContext(body, from);
-        const { intents, contextUsed, topicContinuity } = intentResult;
+        const { intents, contextUsed, topicContinuity, isOffTopic } = intentResult;
         
         logger.info(`Intenciones detectadas: ${JSON.stringify(intents)} (contexto: ${contextUsed ? 'sí' : 'no'})`);
         
-        // Extraer entidades con contexto conversacional
-        const entities = await extractEntitiesWithContext(body, from);
-        logger.info(`Entidades extraídas: ${JSON.stringify(entities)}`);
+        // Si es una pregunta fuera de contexto, manejar especialmente
+        if (isOffTopic) {
+            logger.info(`Pregunta fuera de contexto detectada para ${from}`);
+            const offTopicResponse = await generateOffTopicResponseForUser(body, user, conversationMemory, from);
+            await client.sendMessage(from, offTopicResponse);
+            logger.info(`Respuesta fuera de contexto enviada a ${from}: ${offTopicResponse}`);
+            
+            // Guardar mensaje pero no actualizar memoria conversacional con intenciones incorrectas
+            await saveMessage(user?._id || 'temp', from, body, true);
+            await saveMessage(user?._id || 'temp', from, offTopicResponse, false);
+            return;
+        }
+        
+        // Extraer entidades con contexto conversacional solo si hay intenciones válidas
+        let entities = {};
+        if (intents && intents.length > 0) {
+            entities = await extractEntitiesWithContext(body, from);
+            logger.info(`Entidades extraídas: ${JSON.stringify(entities)}`);
+        }
         
         // Detectar cambios de contexto
         const contextChange = detectContextChange(intents, conversationMemory.conversationContext);
@@ -93,6 +109,9 @@ const handleMessage = async (client, message) => {
         // Preparar el contexto de la conversación mejorado
         const conversationContext = await buildEnhancedConversationContext(from, updatedMemory, contextChange);
         
+        // Agregar información de pregunta fuera de contexto al contexto
+        conversationContext.isOffTopic = isOffTopic;
+        
         // Procesar intenciones y manejar flujos
         await processIntentsWithContext(intents, entities, user, from, conversationContext, contextChange);
         
@@ -110,12 +129,8 @@ const handleMessage = async (client, message) => {
         await client.sendMessage(from, response);
         logger.info(`Respuesta enviada a ${from}: ${response}`);
         
-        // Guardar la respuesta en el historial SOLO si hay un usuario válido
-        if (user && user._id) {
-            await saveMessage(user._id, from, response, false);
-        } else {
-            logger.debug(`No se guardó el mensaje de respuesta - usuario temporal para ${from}`);
-        }
+        // Guardar la respuesta en el historial y actualizar memoria
+        await saveMessage(user?._id || 'temp', from, response, false);
         
         // Actualizar memoria con la respuesta del bot
         await updateConversationMemory(from, {
@@ -146,6 +161,60 @@ const handleMessage = async (client, message) => {
 };
 
 /**
+ * Genera respuesta específica para preguntas fuera de contexto
+ * @param {string} message - Mensaje del usuario
+ * @param {Object} user - Usuario (si existe)
+ * @param {Object} conversationMemory - Memoria conversacional
+ * @param {string} phoneNumber - Número de teléfono
+ * @returns {string} - Respuesta generada
+ */
+const generateOffTopicResponseForUser = async (message, user, conversationMemory, phoneNumber) => {
+    try {
+        const userName = user ? user.name : (conversationMemory.userProfile?.name || null);
+        const hasActiveFlow = activeFlowStates.has(phoneNumber);
+        const currentTopic = conversationMemory.conversationContext?.currentTopic;
+        
+        let response = '';
+        
+        if (userName && userName !== 'Usuario') {
+            response = `Hola ${userName}, `;
+        } else {
+            response = 'Hola, ';
+        }
+        
+        // Respuesta amigable pero redirigiendo al contexto empresarial
+        response += 'esa es una pregunta interesante, pero soy un asistente especializado en ';
+        response += `${generalConfig.serviceMetadata.name}. `;
+        
+        // Si hay un flujo activo, recordar el proceso
+        if (hasActiveFlow) {
+            const activeFlow = activeFlowStates.get(phoneNumber);
+            if (activeFlow.flowType === 'trial_request') {
+                response += `¿Te gustaría continuar con tu solicitud de cuenta de prueba? `;
+                response += 'Estaba esperando algunos datos para completar tu registro.';
+            } else {
+                response += '¿En qué más puedo ayudarte con nuestro sistema?';
+            }
+        } else if (currentTopic === 'trial_request') {
+            response += '¿Te gustaría saber más sobre nuestro sistema ERP o crear una cuenta de prueba?';
+        } else {
+            // Ofrecer opciones principales
+            response += 'Puedo ayudarte con:\n';
+            response += '• Información sobre nuestro sistema ERP\n';
+            response += '• Crear una cuenta de prueba gratuita (7 días)\n';
+            response += '• Resolver dudas técnicas\n';
+            response += '• Información de precios y características\n\n';
+            response += '¿En qué te puedo ayudar?';
+        }
+        
+        return response;
+    } catch (error) {
+        logger.error(`Error generando respuesta fuera de contexto: ${error.message}`);
+        return 'Disculpa, soy un asistente especializado en sistemas ERP. ¿En qué puedo ayudarte con nuestro servicio?';
+    }
+};
+
+/**
  * Actualiza la información del usuario con las entidades detectadas
  * @param {Object} existingUser - Usuario existente (puede ser null)
  * @param {string} phoneNumber - Número de teléfono
@@ -154,12 +223,6 @@ const handleMessage = async (client, message) => {
  */
 const updateUserWithEntities = async (existingUser, phoneNumber, entities) => {
     try {
-        // Solo crear/actualizar usuario si tenemos información mínima necesaria
-        if (!entities.nombre && !entities.email && !existingUser) {
-            logger.debug(`No se creará usuario - información insuficiente para ${phoneNumber}`);
-            return null;
-        }
-        
         const userData = {
             phone: phoneNumber,
             name: entities.nombre || (existingUser ? existingUser.name : 'Usuario'),
@@ -197,10 +260,12 @@ const buildEnhancedConversationContext = async (phoneNumber, memory, contextChan
         // Información de memoria conversacional
         userProfile: memory.userProfile,
         knownEntities: memory.knownEntities,
+        userKnowledge: memory.knownEntities, // Alias para compatibilidad
         currentTopic: memory.conversationContext.currentTopic,
         topicHistory: memory.topicHistory,
         contextStrength: memory.conversationContext.contextStrength,
         recentMessages: memory.messageHistory.slice(-5),
+        conversationHistory: memory.messageHistory.slice(-3), // Alias para compatibilidad
         recentIntents: memory.intentHistory.slice(0, 3).map(item => item.intent),
         
         // Información de cambio de contexto
@@ -217,7 +282,16 @@ const buildEnhancedConversationContext = async (phoneNumber, memory, contextChan
         
         // Metadatos adicionales
         conversationAge: new Date() - new Date(memory.createdAt),
-        lastActivity: memory.lastUpdate
+        conversationLength: new Date() - new Date(memory.createdAt), // Alias para compatibilidad
+        lastActivity: memory.lastUpdate,
+        
+        // Pistas contextuales para el análisis
+        contextualClues: {
+            hasUserProfile: memory.userProfile.isRegistered,
+            knownEntitiesCount: Object.keys(memory.knownEntities).length,
+            conversationLength: memory.messageHistory.length,
+            topicStability: memory.conversationContext.contextStrength
+        }
     };
 };
 
@@ -310,6 +384,10 @@ const startTrialRequestFlowWithContext = async (entities, user, phoneNumber, con
                 currentStep: 0,
                 missingFields: missingFields,
                 collectedData: allKnownData,
+                flowData: {
+                    missingFields: missingFields,
+                    ...allKnownData
+                },
                 startTime: new Date()
             });
             
@@ -339,6 +417,9 @@ const startSupportFlowWithContext = async (entities, user, phoneNumber, conversa
             issueDescription: entities.problema || '',
             userInfo: user || conversationContext.userProfile,
             collectedData: entities,
+            flowData: {
+                issueDescription: entities.problema || ''
+            },
             startTime: new Date()
         });
         
@@ -411,6 +492,12 @@ const continueTrialRequestFlow = async (phoneNumber, entities, conversationConte
             ...entities
         };
         
+        // Actualizar flowData también
+        activeFlow.flowData = {
+            ...activeFlow.flowData,
+            ...entities
+        };
+        
         // Verificar si ahora tenemos toda la información
         const missingFields = [];
         if (!activeFlow.collectedData.nombre) missingFields.push('nombre');
@@ -425,6 +512,7 @@ const continueTrialRequestFlow = async (phoneNumber, entities, conversationConte
         } else {
             // Actualizar campos faltantes y avanzar paso
             activeFlow.missingFields = missingFields;
+            activeFlow.flowData.missingFields = missingFields;
             activeFlow.currentStep++;
             activeFlowStates.set(phoneNumber, activeFlow);
         }
@@ -438,7 +526,7 @@ const continueTrialRequestFlow = async (phoneNumber, entities, conversationConte
  * Continúa el flujo de soporte técnico
  * @param {string} phoneNumber - Número de teléfono
  * @param {Object} entities - Entidades extraídas
- * @param {Object} conversationContext - Contexto de la conversación
+ * @param {Object} conversationContext - Contexto de conversación
  */
 const continueSupportFlow = async (phoneNumber, entities, conversationContext) => {
     try {
@@ -448,6 +536,7 @@ const continueSupportFlow = async (phoneNumber, entities, conversationContext) =
         // Actualizar información del problema
         if (entities.problema) {
             activeFlow.issueDescription += ' ' + entities.problema;
+            activeFlow.flowData.issueDescription = activeFlow.issueDescription;
         }
         
         // Avanzar en el flujo
@@ -656,6 +745,7 @@ setInterval(cleanupExpiredFlows, 15 * 60 * 1000);
 // Exportar funciones principales
 module.exports = {
     handleMessage,
+    generateOffTopicResponseForUser,
     updateUserWithEntities,
     buildEnhancedConversationContext,
     processIntentsWithContext,

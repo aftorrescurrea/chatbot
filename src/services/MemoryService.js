@@ -1,5 +1,5 @@
 /**
- * Servicio de memoria conversacional (CORREGIDO)
+ * Servicio de memoria conversacional
  * Mantiene el contexto de las conversaciones entre cambios de tema
  */
 
@@ -115,19 +115,11 @@ const initializeMemoryForUser = async (phoneNumber) => {
         // Obtener información del usuario si existe
         const user = await findUserByPhone(phoneNumber);
         
-        // Obtener historial reciente de conversación SOLO si hay un usuario válido
-        let recentHistory = [];
-        if (user && user._id) {
-            try {
-                recentHistory = await getConversationHistoryByPhone(
-                    phoneNumber, 
-                    MEMORY_CONFIG.maxHistoryLength
-                );
-            } catch (historyError) {
-                logger.warn(`No se pudo obtener historial para ${phoneNumber}: ${historyError.message}`);
-                recentHistory = [];
-            }
-        }
+        // Obtener historial reciente de conversación
+        const recentHistory = await getConversationHistoryByPhone(
+            phoneNumber, 
+            MEMORY_CONFIG.maxHistoryLength
+        );
         
         // Crear estructura de memoria
         const memory = {
@@ -340,7 +332,7 @@ const extractEntitiesFromHistory = (history, user) => {
     
     // Agregar entidades del perfil de usuario si existe
     if (user) {
-        if (user.name && user.name !== 'Usuario') {
+        if (user.name) {
             entities.nombre = {
                 value: user.name,
                 confidence: 1.0,
@@ -350,7 +342,7 @@ const extractEntitiesFromHistory = (history, user) => {
             };
         }
         
-        if (user.email && !user.email.includes('@temp.com')) {
+        if (user.email) {
             entities.email = {
                 value: user.email,
                 confidence: 1.0,
@@ -487,34 +479,6 @@ const getMemoryStats = () => {
     };
 };
 
-/**
- * Limpia automáticamente memorias expiradas
- */
-const cleanupExpiredMemories = () => {
-    const now = new Date();
-    const expiredUsers = [];
-    
-    for (const [phoneNumber, memory] of conversationMemory.entries()) {
-        const expirationTime = new Date(memory.lastUpdate);
-        expirationTime.setHours(expirationTime.getHours() + MEMORY_CONFIG.memoryExpirationHours);
-        
-        if (now > expirationTime) {
-            expiredUsers.push(phoneNumber);
-        }
-    }
-    
-    for (const phoneNumber of expiredUsers) {
-        clearConversationMemory(phoneNumber);
-    }
-    
-    if (expiredUsers.length > 0) {
-        logger.info(`Limpieza automática de memoria: ${expiredUsers.length} usuarios expirados eliminados`);
-    }
-};
-
-// Ejecutar limpieza cada 2 horas
-setInterval(cleanupExpiredMemories, 2 * 60 * 60 * 1000);
-
 module.exports = {
     getConversationMemory,
     updateConversationMemory,
@@ -522,6 +486,5 @@ module.exports = {
     determineTopicFromIntents,
     clearConversationMemory,
     getMemoryStats,
-    cleanupExpiredMemories,
     MEMORY_CONFIG
 };

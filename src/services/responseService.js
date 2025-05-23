@@ -21,6 +21,11 @@ const generateResponse = async (message, intents, entities, userData, conversati
     try {
         logger.debug(`Generando respuesta contextual para intenciones: ${JSON.stringify(intents)}`);
         
+        // Verificar si es una pregunta fuera de contexto
+        if (conversationContext.isOffTopic) {
+            return generateOffTopicResponse(message, userData, conversationContext);
+        }
+        
         // Analizar el contexto para determinar el tipo de respuesta
         const responseContext = analyzeResponseContext(intents, entities, userData, conversationContext);
         
@@ -49,6 +54,51 @@ const generateResponse = async (message, intents, entities, userData, conversati
 };
 
 /**
+ * Genera respuesta para preguntas fuera de contexto
+ * @param {string} message - Mensaje del usuario
+ * @param {Object} userData - Datos del usuario
+ * @param {Object} conversationContext - Contexto de conversación
+ * @returns {string} - Respuesta generada
+ */
+const generateOffTopicResponse = (message, userData, conversationContext) => {
+    const userName = getUserName(userData, conversationContext);
+    
+    // Determinar si estamos en medio de un proceso importante
+    const hasActiveFlow = conversationContext.activeFlow;
+    const isInTrialProcess = conversationContext.currentTopic === 'trial_request';
+    
+    let response = '';
+    
+    if (userName) {
+        response = `Hola ${userName}, `;
+    } else {
+        response = 'Hola, ';
+    }
+    
+    // Respuesta amigable pero redirigiendo al contexto empresarial
+    response += 'esa es una pregunta interesante, pero soy un asistente especializado en ';
+    response += `${generalConfig.serviceMetadata.name}. `;
+    
+    // Si hay un flujo activo, recordar el proceso
+    if (hasActiveFlow && hasActiveFlow.flowType === 'trial_request') {
+        response += `¿Te gustaría continuar con tu solicitud de cuenta de prueba? `;
+        response += 'Estaba esperando algunos datos para completar tu registro.';
+    } else if (isInTrialProcess) {
+        response += '¿Te gustaría saber más sobre nuestro sistema ERP o crear una cuenta de prueba?';
+    } else {
+        // Ofrecer opciones principales
+        response += 'Puedo ayudarte con:\n';
+        response += '• Información sobre nuestro sistema ERP\n';
+        response += '• Crear una cuenta de prueba gratuita (7 días)\n';
+        response += '• Resolver dudas técnicas\n';
+        response += '• Información de precios y características\n\n';
+        response += '¿En qué te puedo ayudar?';
+    }
+    
+    return response;
+};
+
+/**
  * Analiza el contexto para determinar el tipo de respuesta apropiada
  * @param {Array} intents - Intenciones detectadas
  * @param {Object} entities - Entidades extraídas
@@ -68,7 +118,8 @@ const analyzeResponseContext = (intents, entities, userData, conversationContext
         primaryIntent: intents && intents.length > 0 ? intents[0] : null,
         entityTypes: entities ? Object.keys(entities) : [],
         timeOfDay: new Date().getHours(),
-        isReturningUser: conversationContext.conversationLength > 5 * 60 * 1000 // Más de 5 minutos de conversación
+        isReturningUser: conversationContext.conversationLength > 5 * 60 * 1000, // Más de 5 minutos de conversación
+        isOffTopic: conversationContext.isOffTopic || false
     };
 };
 
@@ -177,10 +228,17 @@ const generateContextTransitionResponse = async (message, intents, entities, use
     const userName = getUserName(userData, conversationContext);
     const contextChange = conversationContext.contextChange;
     
-    // Reconocer el cambio de tema explícitamente
+    // Solo reconocer cambios de tema importantes, no cambios menores
+    if (contextChange.confidence < 0.7) {
+        return await generateIntentBasedResponse(message, intents, entities, userData, conversationContext, responseContext);
+    }
+    
+    // Reconocer el cambio de tema explícitamente solo para cambios importantes
     let transitionPhrase = '';
     
-    if (contextChange.previousTopic && contextChange.suggestedTopic) {
+    if (contextChange.previousTopic && contextChange.suggestedTopic && 
+        contextChange.previousTopic !== 'greeting' && contextChange.suggestedTopic !== 'greeting') {
+        
         const topicNames = {
             'trial_request': 'solicitud de prueba',
             'technical_support': 'soporte técnico',
@@ -189,9 +247,7 @@ const generateContextTransitionResponse = async (message, intents, entities, use
             'service_interest': 'información del servicio'
         };
         
-        const previousTopicName = topicNames[contextChange.previousTopic] || contextChange.previousTopic;
         const newTopicName = topicNames[contextChange.suggestedTopic] || contextChange.suggestedTopic;
-        
         transitionPhrase = `Perfecto${userName ? `, ${userName}` : ''}, veo que ahora te interesa ${newTopicName}. `;
     }
     
@@ -266,6 +322,18 @@ const generateIntentBasedResponse = async (message, intents, entities, userData,
 const generateGreetingResponse = (userName, userData, conversationContext, responseContext) => {
     let greeting = '';
     
+    // Evitar saludo repetitivo para usuarios conocidos en conversación activa
+    if (responseContext.isRegisteredUser && conversationContext.conversationHistory && 
+        conversationContext.conversationHistory.length > 2) {
+        
+        // Si ya hay historial, dar una respuesta más directa
+        if (userName) {
+            return `Hola de nuevo, ${userName}! ¿En qué más puedo ayudarte?`;
+        } else {
+            return '¿En qué más puedo ayudarte?';
+        }
+    }
+    
     // Personalizar saludo según hora del día
     const hour = responseContext.timeOfDay;
     if (hour < 12) {
@@ -273,7 +341,7 @@ const generateGreetingResponse = (userName, userData, conversationContext, respo
     } else if (hour < 18) {
         greeting = 'Buenas tardes';
     } else {
-        greeting = 'Buenas noches';
+        greeting = 'Buenas noches';  
     }
     
     // Personalizar según si es usuario conocido
@@ -721,6 +789,7 @@ const generateProactiveSuggestions = (conversationContext, userData) => {
 // Exportar funciones principales
 module.exports = {
     generateResponse,
+    generateOffTopicResponse,
     analyzeResponseContext,
     generateFlowResponse,
     generateTrialFlowResponse,

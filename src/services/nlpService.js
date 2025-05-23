@@ -1,12 +1,12 @@
 /**
- * Servicio de procesamiento de lenguaje natural contextual
+ * Servicio de procesamiento de lenguaje natural contextual mejorado
  * Detecta intenciones y extrae entidades considerando el contexto conversacional
  */
 
 const { logger } = require('../utils/logger');
 const { intentConfig } = require('../config/promptConfig');
 const promptService = require('./promptService');
-const { getContextForPrompt } = require('./MemoryService'); // Fixed import path
+const { getContextForPrompt } = require('./MemoryService');
 
 /**
  * Detecta las intenciones del mensaje del usuario considerando el contexto conversacional
@@ -19,6 +19,18 @@ const detectIntentsWithContext = async (message, phoneNumber, options = {}) => {
     try {
         // Obtener contexto conversacional
         const context = await getContextForPrompt(phoneNumber);
+        
+        // Verificar si el mensaje es una pregunta fuera de contexto
+        if (isOffTopicQuestion(message)) {
+            logger.info(`Pregunta fuera de contexto detectada: "${message}"`);
+            return {
+                intents: [],
+                contextUsed: true,
+                topicContinuity: false,
+                isOffTopic: true,
+                originalMessage: message
+            };
+        }
         
         // Configurar variables específicas para este prompt contextual
         const variables = {
@@ -37,8 +49,11 @@ const detectIntentsWithContext = async (message, phoneNumber, options = {}) => {
             variables
         );
         
+        // Validar las intenciones detectadas contra el contexto
+        const validatedResult = validateIntentsAgainstContext(result, context, message);
+        
         return {
-            ...result,
+            ...validatedResult,
             context: context,
             contextStrength: context.contextStrength
         };
@@ -47,6 +62,149 @@ const detectIntentsWithContext = async (message, phoneNumber, options = {}) => {
         // Fallback al método sin contexto
         return await detectIntentsBasic(message, options);
     }
+};
+
+/**
+ * Verifica si una pregunta está fuera del contexto del negocio
+ * @param {string} message - Mensaje del usuario
+ * @returns {boolean} - Si la pregunta está fuera de contexto
+ */
+const isOffTopicQuestion = (message) => {
+    const messageLower = message.toLowerCase().trim();
+    
+    // Patrones de preguntas claramente fuera de contexto
+    const offTopicPatterns = [
+        // Preguntas sobre colores, astronomía, geografía general
+        /de qu[eé] color/,
+        /qu[eé] color/,
+        /la luna/,
+        /el sol/,
+        /las estrellas/,
+        /el cielo/,
+        
+        // Preguntas sobre animales
+        /los animales/,
+        /los perros/,
+        /los gatos/,
+        
+        // Preguntas matemáticas básicas sin contexto empresarial
+        /cu[aá]nto es \d+ \+ \d+/,
+        /cu[aá]nto es \d+ - \d+/,
+        /cu[aá]nto es \d+ \* \d+/,
+        /cu[aá]nto es \d+ \/ \d+/,
+        
+        // Preguntas de conocimiento general sin relación
+        /capital de/,
+        /presidente de/,
+        /historia de/,
+        /cuando fue/,
+        /en qu[eé] a[ñn]o/,
+        
+        // Preguntas personales sin contexto empresarial
+        /cu[aá]ntos a[ñn]os tienes/,
+        /d[oó]nde vives/,
+        /tienes familia/,
+        /te gusta/,
+        
+        // Preguntas de entretenimiento
+        /cu[eé]ntame un chiste/,
+        /una historia/,
+        /recomienda una pel[ií]cula/,
+        /qu[eé] m[uú]sica/,
+        
+        // Saludos casuales sin intención clara
+        /qu[eé] tal el clima/,
+        /c[oó]mo est[aá] el d[ií]a/,
+        
+        // Preguntas existenciales o filosóficas
+        /cu[aá]l es el sentido/,
+        /por qu[eé] existimos/,
+        /qu[eé] es la vida/
+    ];
+    
+    // Verificar si el mensaje coincide con algún patrón
+    const isOffTopic = offTopicPatterns.some(pattern => pattern.test(messageLower));
+    
+    // Verificaciones adicionales
+    if (isOffTopic) {
+        return true;
+    }
+    
+    // Verificar preguntas muy cortas sin contexto empresarial
+    if (messageLower.length < 10) {
+        const businessKeywords = [
+            'erp', 'sistema', 'empresa', 'negocio', 'inventario', 'factura', 'contabilidad',
+            'prueba', 'demo', 'cuenta', 'usuario', 'precio', 'costo', 'soporte', 'ayuda'
+        ];
+        
+        const hasBusinessContext = businessKeywords.some(keyword => 
+            messageLower.includes(keyword)
+        );
+        
+        if (!hasBusinessContext && messageLower.includes('?')) {
+            return true;
+        }
+    }
+    
+    return false;
+};
+
+/**
+ * Valida las intenciones detectadas contra el contexto conversacional
+ * @param {Object} result - Resultado de detección de intenciones
+ * @param {Object} context - Contexto conversacional
+ * @param {string} message - Mensaje original
+ * @returns {Object} - Resultado validado
+ */
+const validateIntentsAgainstContext = (result, context, message) => {
+    if (!result.intents || result.intents.length === 0) {
+        return result;
+    }
+    
+    const messageLower = message.toLowerCase();
+    const validatedIntents = [];
+    
+    for (const intent of result.intents) {
+        let isValid = true;
+        
+        // Validar intención 'consulta_caracteristicas' 
+        if (intent === 'consulta_caracteristicas') {
+            const hasFeatureKeywords = [
+                'caracter', 'funciona', 'modulo', 'sistema', 'que hace', 'que tiene',
+                'incluye', 'capacidad', 'herramienta', 'opciones', 'servicio'
+            ].some(keyword => messageLower.includes(keyword));
+            
+            // Si no tiene palabras clave relacionadas con características del sistema
+            if (!hasFeatureKeywords) {
+                logger.debug(`Intención 'consulta_caracteristicas' invalidada para: "${message}"`);
+                isValid = false;
+            }
+        }
+        
+        // Validar intención 'saludo' para usuarios conocidos
+        if (intent === 'saludo' && context.userProfile && context.userProfile.isRegistered) {
+            const isSimpleGreeting = ['hola', 'buenos dias', 'buenas tardes', 'saludos'].some(
+                greeting => messageLower === greeting || messageLower.startsWith(greeting + ' ')
+            );
+            
+            // Si no es un saludo simple y el usuario ya está en conversación
+            if (!isSimpleGreeting && context.recentMessages && context.recentMessages.length > 2) {
+                logger.debug(`Intención 'saludo' invalidada para usuario conocido: "${message}"`);
+                isValid = false;
+            }
+        }
+        
+        if (isValid) {
+            validatedIntents.push(intent);
+        }
+    }
+    
+    return {
+        ...result,
+        intents: validatedIntents,
+        originalIntents: result.intents,
+        wasValidated: validatedIntents.length !== result.intents.length
+    };
 };
 
 /**
@@ -117,7 +275,7 @@ const enrichEntitiesWithContext = (extractedEntities, context, message) => {
         }
     }
     
-    // Enriquecer empresa si no se detectó en el mensaje pero está en contexto
+    // Enriquecer empresa if no se detectó en el mensaje pero está en contexto
     if (!enrichedEntities.empresa && knownEntities.empresa) {
         if (shouldInferEntity(message, 'empresa')) {
             enrichedEntities.empresa = knownEntities.empresa;
@@ -209,8 +367,13 @@ const analyzeContextualCoherence = (message, intents, context) => {
             }
         }
         
-        // Analizar consistencia de entidades
-        // (Este análisis se realizaría comparando entidades actuales con las conocidas)
+        // Verificar si es una pregunta fuera de contexto
+        if (isOffTopicQuestion(message)) {
+            analysis.isCoherent = false;
+            analysis.coherenceScore = 0.1;
+            analysis.contextualClues.push('Pregunta fuera del contexto empresarial');
+            analysis.suggestions.push('Redirigir a funcionalidades del sistema');
+        }
         
         // Analizar patrones de conversación
         if (context.recentIntents && context.recentIntents.length > 0) {
@@ -464,6 +627,8 @@ module.exports = {
     detectContextChange,
     determineTopicFromIntents,
     calculateTopicChangeConfidence,
+    isOffTopicQuestion,
+    validateIntentsAgainstContext,
     // Métodos de fallback
     detectIntentsBasic,
     extractEntitiesBasic
