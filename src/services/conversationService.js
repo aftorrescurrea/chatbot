@@ -80,9 +80,48 @@ const deleteConversationHistory = async (userId) => {
     }
 };
 
+/**
+ * Determina el tema principal basado en las intenciones
+ * @param {Array} intents - Intenciones detectadas
+ * @returns {string} - Tema principal
+ */
+const determineTopicFromIntents = (intents) => {
+    if (!intents || intents.length === 0) return 'general';
+    
+    const topicMapping = {
+        'solicitud_prueba': 'trial_request',
+        'soporte_tecnico': 'technical_support',
+        'consulta_precio': 'pricing_inquiry',
+        'consulta_caracteristicas': 'features_inquiry',
+        'queja': 'complaint',
+        'cancelacion': 'cancellation',
+        'interes_en_servicio': 'service_interest',
+        'saludo': 'greeting',
+        'despedida': 'farewell',
+        'agradecimiento': 'gratitude',
+        'confirmacion': 'confirmation'
+    };
+    
+    // Priorizar por importancia del tema
+    const priorityOrder = [
+        'solicitud_prueba', 'soporte_tecnico', 'queja', 'cancelacion',
+        'consulta_precio', 'consulta_caracteristicas', 'interes_en_servicio',
+        'confirmacion', 'agradecimiento', 'saludo', 'despedida'
+    ];
+    
+    for (const intent of priorityOrder) {
+        if (intents.includes(intent)) {
+            return topicMapping[intent] || 'general';
+        }
+    }
+    
+    return 'general';
+};
+
 module.exports = {
     saveMessage,
     getConversationHistory,
     getConversationHistoryByPhone,
-    deleteConversationHistory
+    deleteConversationHistory,
+    determineTopicFromIntents
 };

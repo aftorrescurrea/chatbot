@@ -14,7 +14,7 @@ const {
     updateConversationMemory, 
     determineTopicFromIntents,
     clearConversationMemory 
-} = require('../services/conversationService');
+} = require('../services/MemoryService'); // Fixed import path
 const { logger } = require('../utils/logger');
 const { generalConfig } = require('../config/promptConfig');
 

@@ -6,7 +6,7 @@
 const { logger } = require('../utils/logger');
 const { intentConfig } = require('../config/promptConfig');
 const promptService = require('./promptService');
-const { getContextForPrompt } = require('./conversationService');
+const { getContextForPrompt } = require('./MemoryService'); // Fixed import path
 
 /**
  * Detecta las intenciones del mensaje del usuario considerando el contexto conversacional

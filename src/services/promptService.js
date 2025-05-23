@@ -11,7 +11,7 @@ const { renderTemplate } = require('../utils/promptTemplates');
 const CONFIG = {
     maxRetries: 3,
     retryDelay: 2000, // 2 segundos
-    timeout: 30000, // 30 segundos
+    timeout: 3000000, // 30 segundos
     temperature: 0.2,
     topP: 0.9,
     topK: 40
