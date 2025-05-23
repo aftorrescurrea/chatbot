@@ -3,9 +3,9 @@ const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const mongoose = require('mongoose');
 const { connectDB } = require('./src/config/database');
-const { handleMessage, getControllerStats, cleanupExpiredFlows } = require('./src/controllers/enhancedMessageController');
-const { getMemoryStats } = require('./src/services/conversationMemoryService');
-const { testConnection } = require('./src/services/enhancedPromptService');
+const { handleMessage, getControllerStats, cleanupExpiredFlows } = require('./src/controllers/messageController');
+const { getMemoryStats } = require('./src/services/MemoryService');
+const { testConnection } = require('./src/services/promptService');
 const { logger } = require('./src/utils/logger');
 
 // Variables globales para el cliente de WhatsApp

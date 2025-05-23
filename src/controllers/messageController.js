@@ -3,9 +3,9 @@
  * Incluye memoria conversacional y procesamiento contextual
  */
 
-const { detectIntentsWithContext, getPrimaryIntentWithContext, detectContextChange } = require('../services/contextualNlpService');
-const { extractEntitiesWithContext } = require('../services/contextualNlpService');
-const { generateResponse } = require('../services/enhancedResponseService');
+const { detectIntentsWithContext, getPrimaryIntentWithContext, detectContextChange } = require('../services/nlpService');
+const { extractEntitiesWithContext } = require('../services/nlpService');
+const { generateResponse } = require('../services/responseService');
 const { createOrUpdateUser, findUserByPhone } = require('../services/userService');
 const { createCredentials } = require('../services/credentialService');
 const { saveMessage } = require('../services/conversationService');
@@ -14,7 +14,7 @@ const {
     updateConversationMemory, 
     determineTopicFromIntents,
     clearConversationMemory 
-} = require('../services/conversationMemoryService');
+} = require('../services/MemoryService');
 const { logger } = require('../utils/logger');
 const { generalConfig } = require('../config/promptConfig');
 
