@@ -3,9 +3,9 @@ const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const mongoose = require('mongoose');
 const { connectDB } = require('./src/config/database');
-const { handleMessage, getControllerStats, cleanupExpiredFlows } = require('./src/controllers/messageController');
-const { getMemoryStats } = require('./src/services/MemoryService');
-const { testConnection } = require('./src/services/promptService');
+const { handleMessage, getControllerStats, cleanupExpiredFlows } = require('./src/controllers/enhancedMessageController');
+const { getMemoryStats } = require('./src/services/conversationMemoryService');
+const { testConnection } = require('./src/services/enhancedPromptService');
 const { logger } = require('./src/utils/logger');
 
 // Variables globales para el cliente de WhatsApp
@@ -143,7 +143,7 @@ function setupWhatsAppEvents() {
                 }
             }
             
-            // Procesar el mensaje con el controlador mejorado
+            // Procesar el mensaje con el controlador mejorado y corregido
             await handleMessage(whatsappClient, message);
             
         } catch (error) {
@@ -209,8 +209,9 @@ function setupPeriodicCleanup() {
             // Limpiar flujos expirados
             cleanupExpiredFlows();
             
-            // Aquí se podrían agregar más tareas de limpieza
-            // como limpiar memoria conversacional muy antigua, etc.
+            // Limpiar memorias conversacionales expiradas
+            const { cleanupExpiredMemories } = require('./src/services/conversationMemoryService');
+            cleanupExpiredMemories();
             
             logger.info('✅ Limpieza periódica completada');
         } catch (error) {
@@ -330,6 +331,8 @@ function determineErrorMessage(error) {
         return 'Nuestro sistema de inteligencia está momentáneamente ocupado. Por favor, intenta de nuevo. 🤖';
     } else if (errorMessage.includes('database') || errorMessage.includes('mongodb')) {
         return 'Hay un problema temporal con nuestros servicios. Por favor, intenta más tarde. 💾';
+    } else if (errorMessage.includes('validation') || errorMessage.includes('cast to objectid')) {
+        return 'Lo siento, hay un problema técnico temporal. Por favor, intenta de nuevo o escribe "ayuda" para contactar soporte. 🔧';
     } else {
         return 'Lo siento, ocurrió un error inesperado. Por favor, intenta nuevamente o contacta a nuestro equipo de soporte. 🛠️';
     }

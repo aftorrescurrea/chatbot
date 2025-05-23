@@ -1,11 +1,11 @@
 /**
- * Controlador mejorado para manejo de mensajes de WhatsApp
+ * Controlador mejorado para manejo de mensajes de WhatsApp (CORREGIDO)
  * Incluye memoria conversacional y procesamiento contextual
  */
 
-const { detectIntentsWithContext, getPrimaryIntentWithContext, detectContextChange } = require('../services/nlpService');
-const { extractEntitiesWithContext } = require('../services/nlpService');
-const { generateResponse } = require('../services/responseService');
+const { detectIntentsWithContext, getPrimaryIntentWithContext, detectContextChange } = require('../services/contextualNlpService');
+const { extractEntitiesWithContext } = require('../services/contextualNlpService');
+const { generateResponse } = require('../services/enhancedResponseService');
 const { createOrUpdateUser, findUserByPhone } = require('../services/userService');
 const { createCredentials } = require('../services/credentialService');
 const { saveMessage } = require('../services/conversationService');
@@ -14,7 +14,7 @@ const {
     updateConversationMemory, 
     determineTopicFromIntents,
     clearConversationMemory 
-} = require('../services/MemoryService'); // Fixed import path
+} = require('../services/conversationMemoryService');
 const { logger } = require('../utils/logger');
 const { generalConfig } = require('../config/promptConfig');
 
@@ -110,8 +110,12 @@ const handleMessage = async (client, message) => {
         await client.sendMessage(from, response);
         logger.info(`Respuesta enviada a ${from}: ${response}`);
         
-        // Guardar la respuesta en el historial y actualizar memoria
-        await saveMessage(user?._id || 'temp', from, response, false);
+        // Guardar la respuesta en el historial SOLO si hay un usuario válido
+        if (user && user._id) {
+            await saveMessage(user._id, from, response, false);
+        } else {
+            logger.debug(`No se guardó el mensaje de respuesta - usuario temporal para ${from}`);
+        }
         
         // Actualizar memoria con la respuesta del bot
         await updateConversationMemory(from, {
@@ -150,6 +154,12 @@ const handleMessage = async (client, message) => {
  */
 const updateUserWithEntities = async (existingUser, phoneNumber, entities) => {
     try {
+        // Solo crear/actualizar usuario si tenemos información mínima necesaria
+        if (!entities.nombre && !entities.email && !existingUser) {
+            logger.debug(`No se creará usuario - información insuficiente para ${phoneNumber}`);
+            return null;
+        }
+        
         const userData = {
             phone: phoneNumber,
             name: entities.nombre || (existingUser ? existingUser.name : 'Usuario'),
