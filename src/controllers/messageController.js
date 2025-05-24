@@ -4,7 +4,7 @@
  */
 
 const { detectIntentsWithContext, getPrimaryIntentWithContext, detectContextChange } = require('../services/nlpService');
-const { extractEntitiesWithContext } = require('../services/nlpService');
+const { extractEntitiesWithContextImproved } = require('../services/nlpService');
 const { generateResponse } = require('../services/responseService');
 const { createOrUpdateUser, findUserByPhone } = require('../services/userService');
 const { createCredentials } = require('../services/credentialService');
@@ -62,7 +62,7 @@ const handleMessage = async (client, message) => {
         // Extraer entidades con contexto conversacional solo si hay intenciones válidas
         let entities = {};
         if (intents && intents.length > 0) {
-            entities = await extractEntitiesWithContext(body, from);
+            entities = await extractEntitiesWithContextImproved(body, from);
             logger.info(`Entidades extraídas: ${JSON.stringify(entities)}`);
         }
         
@@ -499,40 +499,84 @@ const continueTrialRequestFlow = async (phoneNumber, entities, conversationConte
         const activeFlow = activeFlowStates.get(phoneNumber);
         if (!activeFlow) return;
         
-        // Actualizar datos recolectados
+        logger.debug(`🔄 Continuando flujo de prueba para ${phoneNumber}`);
+        logger.debug(`📝 Datos actuales del flujo: ${JSON.stringify(activeFlow.collectedData)}`);
+        logger.debug(`🆕 Nuevas entidades: ${JSON.stringify(entities)}`);
+        
+        // Actualizar datos recolectados con las nuevas entidades
         activeFlow.collectedData = {
             ...activeFlow.collectedData,
             ...entities
         };
         
-        // Actualizar flowData también
         activeFlow.flowData = {
             ...activeFlow.flowData,
             ...entities
         };
         
-        // Verificar si ahora tenemos toda la información
-        const missingFields = [];
-        if (!activeFlow.collectedData.nombre) missingFields.push('nombre');
-        if (!activeFlow.collectedData.email) missingFields.push('email');
-        if (!activeFlow.collectedData.usuario) missingFields.push('usuario');
-        if (!activeFlow.collectedData.clave) missingFields.push('clave');
+        // Calcular campos faltantes con lógica mejorada
+        const missingFields = calculateMissingFields(activeFlow.collectedData);
+        
+        logger.info(`📊 Estado del flujo después de actualización:`);
+        logger.info(`   - Datos recolectados: ${JSON.stringify(activeFlow.collectedData)}`);
+        logger.info(`   - Campos faltantes: ${JSON.stringify(missingFields)}`);
         
         if (missingFields.length === 0) {
-            // Procesar solicitud completa
+            // ✅ Flujo completado - procesar solicitud
+            logger.info(`🎉 Flujo de solicitud de prueba completado para ${phoneNumber}`);
             await processCompletedTrialRequest(phoneNumber, activeFlow.collectedData);
             clearActiveFlowState(phoneNumber);
         } else {
-            // Actualizar campos faltantes y avanzar paso
+            // ⏳ Aún faltan campos - actualizar flujo
             activeFlow.missingFields = missingFields;
             activeFlow.flowData.missingFields = missingFields;
             activeFlow.currentStep++;
             activeFlowStates.set(phoneNumber, activeFlow);
+            
+            logger.info(`⏳ Flujo actualizado - Siguiente paso: solicitar ${missingFields[0]}`);
         }
         
     } catch (error) {
-        logger.error(`Error al continuar flujo de solicitud de prueba: ${error.message}`);
+        logger.error(`❌ Error al continuar flujo de solicitud de prueba: ${error.message}`);
     }
+};
+
+
+/**
+ * Calcula qué campos faltan para completar el registro
+ * @param {Object} collectedData - Datos recolectados hasta ahora
+ * @returns {Array} - Lista de campos faltantes
+ */
+const calculateMissingFields = (collectedData) => {
+    const missingFields = [];
+    
+    // Validar nombre
+    if (!collectedData.nombre || 
+        collectedData.nombre === 'Usuario' ||
+        collectedData.nombre.toLowerCase().includes('quiero') ||
+        collectedData.nombre.toLowerCase().includes('prueba')) {
+        missingFields.push('nombre');
+    }
+    
+    // Validar email
+    if (!collectedData.email || 
+        collectedData.email.includes('@temp.com') || 
+        !collectedData.email.includes('@') ||
+        !collectedData.email.includes('.')) {
+        missingFields.push('email');
+    }
+    
+    // Validar usuario
+    if (!collectedData.usuario) {
+        missingFields.push('usuario');
+    }
+    
+    // Validar clave
+    if (!collectedData.clave) {
+        missingFields.push('clave');
+    }
+    
+    return missingFields;
 };
 
 /**

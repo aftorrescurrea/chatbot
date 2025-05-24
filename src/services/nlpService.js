@@ -640,7 +640,38 @@ const determineTopicFromIntents = (intents) => {
     return 'general';
 };
 
+const { hybridEntityExtraction } = require('./credentialExtractor');
+
+/**
+ * NUEVA FUNCIÓN: Extrae entidades con fallback de patrones
+ * Reemplaza la función extractEntitiesWithContext existente
+ */
+const extractEntitiesWithContextImproved = async (message, phoneNumber, options = {}) => {
+    try {
+        logger.debug(`🔄 Extrayendo entidades mejoradas de: "${message}"`);
+        
+        // Función original de Ollama
+        const originalExtractor = async (msg) => {
+            return await extractEntitiesWithContext(msg, phoneNumber, options);
+        };
+        
+        // Usar extracción híbrida
+        const entities = await hybridEntityExtraction(message, originalExtractor);
+        
+        logger.info(`✅ Entidades extraídas (mejoradas): ${JSON.stringify(entities)}`);
+        return entities;
+        
+    } catch (error) {
+        logger.error(`❌ Error en extracción mejorada: ${error.message}`);
+        // Fallback: usar solo patrones
+        const { extractCredentialsRobust } = require('./credentialExtractor');
+        return extractCredentialsRobust(message);
+    }
+};
+
 module.exports = {
+    // ... todas las exportaciones existentes
+    extractEntitiesWithContextImproved,  // AGREGAR ESTA LÍNEA
     detectIntentsWithContext,
     extractEntitiesWithContext,
     enrichEntitiesWithContext,
@@ -651,7 +682,6 @@ module.exports = {
     calculateTopicChangeConfidence,
     isOffTopicQuestion,
     validateIntentsAgainstContext,
-    // Métodos de fallback
     detectIntentsBasic,
     extractEntitiesBasic
 };
