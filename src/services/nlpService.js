@@ -484,6 +484,28 @@ const getPrimaryIntentWithContext = (intents, context) => {
         }
     }
 
+    // Si hay múltiples intenciones, considerar el contexto conversacional
+    if (intents.length > 1) {
+        // Si hay confirmacion + solicitud_prueba, priorizar solicitud_prueba
+        if (intents.includes('confirmacion') && intents.includes('solicitud_prueba')) {
+            return 'solicitud_prueba';
+        }
+        
+        // Si hay confirmacion + interes_en_servicio en contexto de servicio, interpretar como solicitud_prueba
+        if (intents.includes('confirmacion') && intents.includes('interes_en_servicio') && 
+            context.currentTopic === 'service_interest') {
+            return 'solicitud_prueba';
+        }
+        
+        // Si solo hay confirmacion pero el contexto reciente incluye solicitud de prueba
+        if (intents.includes('confirmacion')) {
+            const recentIntents = context.recentIntents || [];
+            if (recentIntents.includes('interes_en_servicio') || recentIntents.includes('solicitud_prueba')) {
+                return 'solicitud_prueba';
+            }
+        }
+    }
+
     // Priorizar por importancia general
     const priorities = {
         'solicitud_prueba': 1,

@@ -450,6 +450,35 @@ const generateConfirmationResponse = async (message, entities, userData, convers
         return `Perfecto${userName ? `, ${userName}` : ''}! Continuemos con tu ${conversationContext.activeFlow.flowType === 'trial_request' ? 'solicitud de cuenta de prueba' : 'consulta'}.`;
     }
     
+    // Verificar el contexto de lo que se está confirmando basado en mensajes recientes
+    const recentMessages = conversationContext.recentMessages || conversationContext.conversationHistory || [];
+    const lastBotMessage = recentMessages.find(msg => !msg.isFromUser);
+    
+    if (lastBotMessage && lastBotMessage.message) {
+        const lastMessage = lastBotMessage.message.toLowerCase();
+        
+        // Si el último mensaje del bot preguntaba sobre demostración/prueba
+        if (lastMessage.includes('demostración') || lastMessage.includes('prueba') || 
+            lastMessage.includes('probarlo') || lastMessage.includes('7 días')) {
+            
+            // El usuario está confirmando que quiere una prueba
+            return `¡Genial${userName ? `, ${userName}` : ''}! Me encanta que quieras probar ERP Demo. Para crear tu cuenta necesito: nombre completo, correo electrónico, nombre de usuario deseado, contraseña. ¿Podrías ayudarme con esta información?`;
+        }
+        
+        // Si el último mensaje preguntaba sobre características o información
+        if (lastMessage.includes('características') || lastMessage.includes('información') || 
+            lastMessage.includes('funcionalidades')) {
+            
+            return `Perfecto${userName ? `, ${userName}` : ''}! ¿Te gustaría que te cuente sobre alguna característica específica del ERP, o prefieres directamente crear una cuenta de prueba para explorarlo?`;
+        }
+    }
+    
+    // Si hay intenciones relacionadas con solicitud de prueba en el contexto
+    const recentIntents = conversationContext.recentIntents || [];
+    if (recentIntents.includes('solicitud_prueba') || recentIntents.includes('interes_en_servicio')) {
+        return `¡Genial${userName ? `, ${userName}` : ''}! Me encanta que quieras probar ERP Demo. Para crear tu cuenta necesito: nombre completo, correo electrónico, nombre de usuario deseado, contraseña. ¿Podrías ayudarme con esta información?`;
+    }
+    
     // Si hay información conocida que podría estar confirmando
     if (conversationContext.userKnowledge && Object.keys(conversationContext.userKnowledge).length > 0) {
         return `Perfecto${userName ? `, ${userName}` : ''}! He confirmado tu información. ¿En qué más puedo ayudarte?`;

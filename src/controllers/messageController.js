@@ -54,8 +54,8 @@ const handleMessage = async (client, message) => {
             logger.info(`Respuesta fuera de contexto enviada a ${from}: ${offTopicResponse}`);
             
             // Guardar mensaje pero no actualizar memoria conversacional con intenciones incorrectas
-            await saveMessage(user?._id || 'temp', from, body, true);
-            await saveMessage(user?._id || 'temp', from, offTopicResponse, false);
+            await saveMessage(user?._id || null, from, body, true);
+            await saveMessage(user?._id || null, from, offTopicResponse, false);
             return;
         }
         
@@ -130,7 +130,7 @@ const handleMessage = async (client, message) => {
         logger.info(`Respuesta enviada a ${from}: ${response}`);
         
         // Guardar la respuesta en el historial y actualizar memoria
-        await saveMessage(user?._id || 'temp', from, response, false);
+        await saveMessage(user?._id || null, from, response, false);
         
         // Actualizar memoria con la respuesta del bot
         await updateConversationMemory(from, {
@@ -323,8 +323,21 @@ const processIntentsWithContext = async (intents, entities, user, phoneNumber, c
         
         if (!primaryIntent) return;
         
-        // Iniciar nuevo flujo basado en la intención principal
-        switch (primaryIntent) {
+        // Para confirmaciones, verificar si debería ser interpretada como solicitud de prueba
+        let effectiveIntent = primaryIntent;
+        if (primaryIntent === 'confirmacion') {
+            // Verificar contexto reciente para determinar qué se está confirmando
+            const recentIntents = conversationContext.recentIntents || [];
+            const currentTopic = conversationContext.currentTopic;
+            
+            if (currentTopic === 'service_interest' || recentIntents.includes('interes_en_servicio')) {
+                effectiveIntent = 'solicitud_prueba';
+                logger.info(`Confirmación interpretada como solicitud_prueba debido al contexto de ${currentTopic}`);
+            }
+        }
+        
+        // Iniciar nuevo flujo basado en la intención efectiva
+        switch (effectiveIntent) {
             case 'solicitud_prueba':
                 await startTrialRequestFlowWithContext(entities, user, phoneNumber, conversationContext);
                 break;

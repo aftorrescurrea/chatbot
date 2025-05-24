@@ -210,7 +210,7 @@ function setupPeriodicCleanup() {
             cleanupExpiredFlows();
             
             // Limpiar memorias conversacionales expiradas
-            const { cleanupExpiredMemories } = require('./src/services/conversationMemoryService');
+            const { cleanupExpiredMemories } = require('./src/services/MemoryService');
             cleanupExpiredMemories();
             
             logger.info('✅ Limpieza periódica completada');
