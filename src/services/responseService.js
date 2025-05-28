@@ -21,11 +21,6 @@ const generateResponse = async (message, intents, entities, userData, conversati
     try {
         logger.debug(`Generando respuesta contextual para intenciones: ${JSON.stringify(intents)}`);
         
-        // Verificar si es una pregunta fuera de contexto
-        if (conversationContext.isOffTopic) {
-            return generateOffTopicResponse(message, userData, conversationContext);
-        }
-        
         // Analizar el contexto para determinar el tipo de respuesta
         const responseContext = analyzeResponseContext(intents, entities, userData, conversationContext);
         
@@ -54,51 +49,6 @@ const generateResponse = async (message, intents, entities, userData, conversati
 };
 
 /**
- * Genera respuesta para preguntas fuera de contexto
- * @param {string} message - Mensaje del usuario
- * @param {Object} userData - Datos del usuario
- * @param {Object} conversationContext - Contexto de conversación
- * @returns {string} - Respuesta generada
- */
-const generateOffTopicResponse = (message, userData, conversationContext) => {
-    const userName = getUserName(userData, conversationContext);
-    
-    // Determinar si estamos en medio de un proceso importante
-    const hasActiveFlow = conversationContext.activeFlow;
-    const isInTrialProcess = conversationContext.currentTopic === 'trial_request';
-    
-    let response = '';
-    
-    if (userName) {
-        response = `Hola ${userName}, `;
-    } else {
-        response = 'Hola, ';
-    }
-    
-    // Respuesta amigable pero redirigiendo al contexto empresarial
-    response += 'esa es una pregunta interesante, pero soy un asistente especializado en ';
-    response += `${generalConfig.serviceMetadata.name}. `;
-    
-    // Si hay un flujo activo, recordar el proceso
-    if (hasActiveFlow && hasActiveFlow.flowType === 'trial_request') {
-        response += `¿Te gustaría continuar con tu solicitud de cuenta de prueba? `;
-        response += 'Estaba esperando algunos datos para completar tu registro.';
-    } else if (isInTrialProcess) {
-        response += '¿Te gustaría saber más sobre nuestro sistema ERP o crear una cuenta de prueba?';
-    } else {
-        // Ofrecer opciones principales
-        response += 'Puedo ayudarte con:\n';
-        response += '• Información sobre nuestro sistema ERP\n';
-        response += '• Crear una cuenta de prueba gratuita (7 días)\n';
-        response += '• Resolver dudas técnicas\n';
-        response += '• Información de precios y características\n\n';
-        response += '¿En qué te puedo ayudar?';
-    }
-    
-    return response;
-};
-
-/**
  * Analiza el contexto para determinar el tipo de respuesta apropiada
  * @param {Array} intents - Intenciones detectadas
  * @param {Object} entities - Entidades extraídas
@@ -118,8 +68,7 @@ const analyzeResponseContext = (intents, entities, userData, conversationContext
         primaryIntent: intents && intents.length > 0 ? intents[0] : null,
         entityTypes: entities ? Object.keys(entities) : [],
         timeOfDay: new Date().getHours(),
-        isReturningUser: conversationContext.conversationLength > 5 * 60 * 1000, // Más de 5 minutos de conversación
-        isOffTopic: conversationContext.isOffTopic || false
+        isReturningUser: conversationContext.conversationLength > 5 * 60 * 1000 // Más de 5 minutos de conversación
     };
 };
 
@@ -164,7 +113,7 @@ const generateTrialFlowResponse = async (message, intents, entities, userData, c
     const userName = getUserName(userData, conversationContext);
     
     // Si tenemos toda la información necesaria, confirmar creación
-    if (activeFlow.flowData && activeFlow.flowData.missingFields && activeFlow.flowData.missingFields.length === 0) {
+    if (activeFlow.flowData && !activeFlow.flowData.missingFields?.length) {
         return renderTemplate(responseConfig.responseTemplates.trialConfirmation, {
             nombre: userName,
             usuario: activeFlow.flowData.usuario || entities.usuario,
@@ -178,11 +127,10 @@ const generateTrialFlowResponse = async (message, intents, entities, userData, c
     const currentStep = activeFlow.currentStep || 0;
     
     if (missingFields.length > 0) {
-        // AQUÍ ESTABA EL ERROR - nextField no estaba definido
-        const nextField = missingFields[0]; // AGREGAR ESTA LÍNEA
+        const nextField = missingFields[Math.min(currentStep, missingFields.length - 1)];
         
         // Generar solicitud contextual para el siguiente campo
-        return generateImprovedFieldRequest(nextField, userName, conversationContext);
+        return generateFieldRequestResponse(nextField, userName, entities, conversationContext);
     }
     
     // Fallback
@@ -229,17 +177,10 @@ const generateContextTransitionResponse = async (message, intents, entities, use
     const userName = getUserName(userData, conversationContext);
     const contextChange = conversationContext.contextChange;
     
-    // Solo reconocer cambios de tema importantes, no cambios menores
-    if (contextChange.confidence < 0.7) {
-        return await generateIntentBasedResponse(message, intents, entities, userData, conversationContext, responseContext);
-    }
-    
-    // Reconocer el cambio de tema explícitamente solo para cambios importantes
+    // Reconocer el cambio de tema explícitamente
     let transitionPhrase = '';
     
-    if (contextChange.previousTopic && contextChange.suggestedTopic && 
-        contextChange.previousTopic !== 'greeting' && contextChange.suggestedTopic !== 'greeting') {
-        
+    if (contextChange.previousTopic && contextChange.suggestedTopic) {
         const topicNames = {
             'trial_request': 'solicitud de prueba',
             'technical_support': 'soporte técnico',
@@ -248,7 +189,9 @@ const generateContextTransitionResponse = async (message, intents, entities, use
             'service_interest': 'información del servicio'
         };
         
+        const previousTopicName = topicNames[contextChange.previousTopic] || contextChange.previousTopic;
         const newTopicName = topicNames[contextChange.suggestedTopic] || contextChange.suggestedTopic;
+        
         transitionPhrase = `Perfecto${userName ? `, ${userName}` : ''}, veo que ahora te interesa ${newTopicName}. `;
     }
     
@@ -321,39 +264,26 @@ const generateIntentBasedResponse = async (message, intents, entities, userData,
  * @returns {string} - Respuesta generada
  */
 const generateGreetingResponse = (userName, userData, conversationContext, responseContext) => {
-    // Si ya conocemos al usuario, saludo normal
-    if (userName && userName !== 'Usuario' && !userName.toLowerCase().includes('quiero')) {
-        let greeting = '';
-        const hour = responseContext.timeOfDay;
-        if (hour < 12) {
-            greeting = 'Buenos días';
-        } else if (hour < 18) {
-            greeting = 'Buenas tardes';
-        } else {
-            greeting = 'Buenas noches';  
-        }
-        
-        if (responseContext.isReturningUser) {
-            return `${greeting}, ${userName}! Me alegra verte de nuevo. ¿En qué puedo ayudarte hoy?`;
-        } else {
-            return `${greeting}, ${userName}! Soy el asistente virtual de ${generalConfig.serviceMetadata.name}. ¿En qué puedo ayudarte?`;
-        }
-    }
-    
-    // Si NO conocemos al usuario, solicitar nombre desde el saludo
     let greeting = '';
-    const hour = new Date().getHours();
+    
+    // Personalizar saludo según hora del día
+    const hour = responseContext.timeOfDay;
     if (hour < 12) {
         greeting = 'Buenos días';
     } else if (hour < 18) {
         greeting = 'Buenas tardes';
     } else {
-        greeting = 'Buenas noches';  
+        greeting = 'Buenas noches';
     }
     
-    return `${greeting}! Soy el asistente virtual de ${generalConfig.serviceMetadata.name}. ` +
-           `Estoy aquí para ayudarte con información sobre nuestro sistema ERP y crear cuentas de prueba. ` +
-           `Para comenzar, ¿podrías decirme tu nombre?`;
+    // Personalizar según si es usuario conocido
+    if (responseContext.isReturningUser && userName) {
+        return `${greeting}, ${userName}! Me alegra verte de nuevo. ¿En qué puedo ayudarte hoy?`;
+    } else if (userName) {
+        return `${greeting}, ${userName}! Soy el asistente virtual de ${generalConfig.serviceMetadata.name}. ¿En qué puedo ayudarte?`;
+    } else {
+        return `${greeting}! Soy el asistente virtual de ${generalConfig.serviceMetadata.name}. Estoy aquí para ayudarte con información sobre nuestro sistema ${generalConfig.serviceMetadata.type} y crear cuentas de prueba. ¿En qué puedo ayudarte?`;
+    }
 };
 
 /**
@@ -401,19 +331,16 @@ const generateGratitudeResponse = (userName, userData, conversationContext) => {
  * @param {Object} responseContext - Contexto de respuesta
  * @returns {string} - Respuesta generada
  */
-/**
- * Genera respuesta mejorada para solicitud de prueba
- */
 const generateTrialRequestResponse = (entities, userData, conversationContext, responseContext) => {
-    const userName = entities.nombre || getUserName(userData, conversationContext);
+    const userName = getUserName(userData, conversationContext);
     
     // Combinar información conocida con entidades actuales
     const allKnownData = {
         ...conversationContext.userKnowledge,
         ...entities,
         ...(userData ? {
-            nombre: userData.name !== 'Usuario' ? userData.name : entities.nombre,
-            email: userData.email && !userData.email.includes('@temp.com') ? userData.email : entities.email,
+            nombre: userData.name,
+            email: userData.email,
             empresa: userData.company,
             cargo: userData.position
         } : {})
@@ -421,60 +348,21 @@ const generateTrialRequestResponse = (entities, userData, conversationContext, r
     
     // Determinar qué información falta
     const missingFields = [];
-    if (!allKnownData.nombre || allKnownData.nombre === 'Usuario') {
-        missingFields.push('nombre completo');
-    }
-    if (!allKnownData.email || allKnownData.email.includes('@temp.com') || !allKnownData.email.includes('@')) {
-        missingFields.push('correo electrónico');
-    }
-    if (!allKnownData.usuario) {
-        missingFields.push('nombre de usuario deseado');
-    }
-    if (!allKnownData.clave) {
-        missingFields.push('contraseña');
-    }
-    
-    let response = '';
-    
-    // Si acabamos de obtener el nombre
-    if (entities.nombre && !userName) {
-        response = `¡Perfecto, ${entities.nombre}! `;
-    } else if (userName && userName !== 'Usuario') {
-        response = `¡Genial, ${userName}! `;
-    } else {
-        response = '¡Genial! ';
-    }
+    if (!allKnownData.nombre) missingFields.push('nombre completo');
+    if (!allKnownData.email) missingFields.push('correo electrónico');
+    if (!allKnownData.usuario) missingFields.push('nombre de usuario deseado');
+    if (!allKnownData.clave) missingFields.push('contraseña');
     
     if (missingFields.length === 0) {
-        // Tenemos toda la información
-        response += 'Tengo toda la información necesaria. Voy a crear tu cuenta de prueba ahora mismo.';
+        // Tenemos toda la información - confirmar
+        return `¡Excelente${userName ? `, ${userName}` : ''}! Tengo toda la información necesaria. Voy a crear tu cuenta de prueba de ${generalConfig.serviceMetadata.trialDuration} días ahora mismo.`;
     } else if (missingFields.length === 1) {
         // Solo falta un campo
-        response += `Me encanta que quieras probar ${generalConfig.serviceMetadata.name}. `;
-        response += `Solo necesito una cosa más: tu ${missingFields[0]}. ¿Podrías proporcionármelo?`;
-    } else if (missingFields.length === 2 && 
-               missingFields.includes('nombre de usuario deseado') && 
-               missingFields.includes('contraseña')) {
-        // Solo faltan credenciales
-        response += `Me encanta que quieras probar ${generalConfig.serviceMetadata.name}. `;
-        response += `Para completar tu cuenta, necesito que me proporciones el nombre de usuario y contraseña que quieres usar. `;
-        response += `Puedes escribirlos separados por un espacio, por ejemplo: "miusuario micontraseña123"`;
+        return `Perfecto${userName ? `, ${userName}` : ''}! Solo necesito una cosa más: tu ${missingFields[0]}. ¿Podrías proporcionármelo?`;
     } else {
         // Faltan múltiples campos
-        response += `Me encanta que quieras probar ${generalConfig.serviceMetadata.name}. `;
-        
-        if (missingFields.length === 4) {
-            // Faltan todos los campos
-            response += `Para crear tu cuenta necesito: ${missingFields.join(', ')}. `;
-            response += `Puedes darme toda la información de una vez o paso a paso como prefieras.`;
-        } else {
-            // Faltan algunos campos
-            response += `Para completar tu cuenta necesito: ${missingFields.join(', ')}. `;
-            response += `¿Podrías ayudarme con esta información?`;
-        }
+        return `¡Genial${userName ? `, ${userName}` : ''}! Me encanta que quieras probar ${generalConfig.serviceMetadata.name}. Para crear tu cuenta necesito: ${missingFields.join(', ')}. ¿Podrías ayudarme con esta información?`;
     }
-    
-    return response;
 };
 
 /**
@@ -492,35 +380,6 @@ const generateConfirmationResponse = async (message, entities, userData, convers
     // Si hay un flujo activo, la confirmación probablemente se refiere a ese flujo
     if (conversationContext.activeFlow) {
         return `Perfecto${userName ? `, ${userName}` : ''}! Continuemos con tu ${conversationContext.activeFlow.flowType === 'trial_request' ? 'solicitud de cuenta de prueba' : 'consulta'}.`;
-    }
-    
-    // Verificar el contexto de lo que se está confirmando basado en mensajes recientes
-    const recentMessages = conversationContext.recentMessages || conversationContext.conversationHistory || [];
-    const lastBotMessage = recentMessages.find(msg => !msg.isFromUser);
-    
-    if (lastBotMessage && lastBotMessage.message) {
-        const lastMessage = lastBotMessage.message.toLowerCase();
-        
-        // Si el último mensaje del bot preguntaba sobre demostración/prueba
-        if (lastMessage.includes('demostración') || lastMessage.includes('prueba') || 
-            lastMessage.includes('probarlo') || lastMessage.includes('7 días')) {
-            
-            // El usuario está confirmando que quiere una prueba
-            return `¡Genial${userName ? `, ${userName}` : ''}! Me encanta que quieras probar ERP Demo. Para crear tu cuenta necesito: nombre completo, correo electrónico, nombre de usuario deseado, contraseña. ¿Podrías ayudarme con esta información?`;
-        }
-        
-        // Si el último mensaje preguntaba sobre características o información
-        if (lastMessage.includes('características') || lastMessage.includes('información') || 
-            lastMessage.includes('funcionalidades')) {
-            
-            return `Perfecto${userName ? `, ${userName}` : ''}! ¿Te gustaría que te cuente sobre alguna característica específica del ERP, o prefieres directamente crear una cuenta de prueba para explorarlo?`;
-        }
-    }
-    
-    // Si hay intenciones relacionadas con solicitud de prueba en el contexto
-    const recentIntents = conversationContext.recentIntents || [];
-    if (recentIntents.includes('solicitud_prueba') || recentIntents.includes('interes_en_servicio')) {
-        return `¡Genial${userName ? `, ${userName}` : ''}! Me encanta que quieras probar ERP Demo. Para crear tu cuenta necesito: nombre completo, correo electrónico, nombre de usuario deseado, contraseña. ¿Podrías ayudarme con esta información?`;
     }
     
     // Si hay información conocida que podría estar confirmando
@@ -594,28 +453,24 @@ const generatePricingResponse = (entities, userData, conversationContext) => {
  * @returns {string} - Respuesta generada
  */
 const generateServiceInterestResponse = (entities, userData, conversationContext, responseContext) => {
-    // Si hay un nombre en las entidades pero no en userData, es primera vez
-    const userName = entities.nombre || getUserName(userData, conversationContext);
+    const userName = getUserName(userData, conversationContext);
     const userCompany = userData?.company || conversationContext.userKnowledge?.empresa;
     
-    let response = '';
-    
-    // Si acabamos de obtener el nombre por primera vez
-    if (entities.nombre && (!userData || userData.name === 'Usuario')) {
-        response = `¡Mucho gusto, ${entities.nombre}! `;
-    } else if (userName) {
-        response = `¡Excelente, ${userName}! `;
-    } else {
-        response = '¡Excelente! ';
-    }
-    
-    response += `Me alegra tu interés en ${generalConfig.serviceMetadata.name}`;
+    let response = `¡Excelente${userName ? `, ${userName}` : ''}! Me alegra mucho tu interés en ${generalConfig.serviceMetadata.name}`;
     
     if (userCompany) {
         response += ` para ${userCompany}`;
     }
     
-    response += '. Nuestro sistema incluye ';
+    response += '. ';
+    
+    // Personalizar según el contexto
+    if (responseContext.isReturningUser) {
+        response += 'Como ya hemos hablado antes, sabes que nuestro sistema incluye ';
+    } else {
+        response += 'Nuestro sistema incluye ';
+    }
+    
     response += `${generalConfig.serviceMetadata.features.slice(0, 3).join(', ')} y mucho más. `;
     response += `¿Te gustaría una demostración gratuita de ${generalConfig.serviceMetadata.trialDuration} días para probarlo?`;
     
@@ -863,48 +718,9 @@ const generateProactiveSuggestions = (conversationContext, userData) => {
     return suggestions.length > 0 ? ' ' + suggestions[0] : '';
 };
 
-/**
- * Genera respuesta mejorada para solicitar campos específicos
- * @param {string} fieldName - Campo a solicitar
- * @param {string} userName - Nombre del usuario
- * @param {Object} conversationContext - Contexto
- * @returns {string} - Respuesta generada
- */
-const generateImprovedFieldRequest = (fieldName, userName, conversationContext) => {
-    const userPrefix = userName && userName !== 'Usuario' ? `Perfecto, ${userName}. ` : '';
-    
-    switch (fieldName) {
-        case 'nombre':
-            return `${userPrefix}Para crear tu cuenta de prueba, necesito tu nombre completo. ¿Cómo te llamas?`;
-            
-        case 'email':
-            return `${userPrefix}Ahora necesito tu correo electrónico para enviarte la información de acceso. ¿Cuál es tu email?`;
-            
-        case 'usuario':
-        case 'clave':
-            // Si faltan ambos, pedirlos juntos
-            const activeFlow = conversationContext.activeFlow;
-            const missingFields = activeFlow?.flowData?.missingFields || [];
-            
-            if (missingFields.includes('usuario') && missingFields.includes('clave')) {
-                return `${userPrefix}Para completar tu cuenta, necesito el nombre de usuario y contraseña que quieres usar. Puedes escribirlos separados por un espacio, por ejemplo: "miusuario micontraseña123"`;
-            } else if (fieldName === 'usuario') {
-                return `${userPrefix}¿Qué nombre de usuario te gustaría usar para acceder al sistema? Por ejemplo: "juan2024" o "admin_empresa"`;
-            } else {
-                return `${userPrefix}Por último, establece una contraseña segura para tu cuenta. ¿Qué contraseña te gustaría usar?`;
-            }
-            
-        default:
-            return `${userPrefix}Necesito un poco más de información para completar tu solicitud.`;
-    }
-};
-
 // Exportar funciones principales
 module.exports = {
-    // ... todas las exportaciones existentes
-    generateImprovedFieldRequest,  // AGREGAR ESTA LÍNEA
     generateResponse,
-    generateOffTopicResponse,
     analyzeResponseContext,
     generateFlowResponse,
     generateTrialFlowResponse,

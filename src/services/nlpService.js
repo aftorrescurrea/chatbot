@@ -1,12 +1,13 @@
 /**
- * Servicio de procesamiento de lenguaje natural contextual mejorado
+ * Servicio de procesamiento de lenguaje natural contextual
  * Detecta intenciones y extrae entidades considerando el contexto conversacional
  */
 
 const { logger } = require('../utils/logger');
-const { intentConfig } = require('../config/promptConfig');
 const promptService = require('./promptService');
 const { getContextForPrompt } = require('./MemoryService');
+const intentService = require('./intentService');
+const entityService = require('./entityService');
 
 /**
  * Detecta las intenciones del mensaje del usuario considerando el contexto conversacional
@@ -20,23 +21,14 @@ const detectIntentsWithContext = async (message, phoneNumber, options = {}) => {
         // Obtener contexto conversacional
         const context = await getContextForPrompt(phoneNumber);
         
-        // Verificar si el mensaje es una pregunta fuera de contexto
-        if (isOffTopicQuestion(message)) {
-            logger.info(`Pregunta fuera de contexto detectada: "${message}"`);
-            return {
-                intents: [],
-                contextUsed: true,
-                topicContinuity: false,
-                isOffTopic: true,
-                originalMessage: message
-            };
-        }
+        // Obtener intenciones desde la base de datos
+        const nlpIntents = await intentService.getIntentsForNLP();
         
         // Configurar variables específicas para este prompt contextual
         const variables = {
-            supportedIntents: options.supportedIntents || intentConfig.supportedIntents,
-            intentExamples: options.intentExamples || intentConfig.intentExamples,
-            conversationExamples: options.conversationExamples || intentConfig.conversationExamples,
+            supportedIntents: options.supportedIntents || nlpIntents.supportedIntents,
+            intentExamples: options.intentExamples || nlpIntents.intentExamples,
+            conversationExamples: options.conversationExamples || nlpIntents.conversationExamples,
             serviceType: options.serviceType || 'ERP',
             context: context
         };
@@ -49,11 +41,8 @@ const detectIntentsWithContext = async (message, phoneNumber, options = {}) => {
             variables
         );
         
-        // Validar las intenciones detectadas contra el contexto
-        const validatedResult = validateIntentsAgainstContext(result, context, message);
-        
         return {
-            ...validatedResult,
+            ...result,
             context: context,
             contextStrength: context.contextStrength
         };
@@ -62,149 +51,6 @@ const detectIntentsWithContext = async (message, phoneNumber, options = {}) => {
         // Fallback al método sin contexto
         return await detectIntentsBasic(message, options);
     }
-};
-
-/**
- * Verifica si una pregunta está fuera del contexto del negocio
- * @param {string} message - Mensaje del usuario
- * @returns {boolean} - Si la pregunta está fuera de contexto
- */
-const isOffTopicQuestion = (message) => {
-    const messageLower = message.toLowerCase().trim();
-    
-    // Patrones de preguntas claramente fuera de contexto
-    const offTopicPatterns = [
-        // Preguntas sobre colores, astronomía, geografía general
-        /de qu[eé] color/,
-        /qu[eé] color/,
-        /la luna/,
-        /el sol/,
-        /las estrellas/,
-        /el cielo/,
-        
-        // Preguntas sobre animales
-        /los animales/,
-        /los perros/,
-        /los gatos/,
-        
-        // Preguntas matemáticas básicas sin contexto empresarial
-        /cu[aá]nto es \d+ \+ \d+/,
-        /cu[aá]nto es \d+ - \d+/,
-        /cu[aá]nto es \d+ \* \d+/,
-        /cu[aá]nto es \d+ \/ \d+/,
-        
-        // Preguntas de conocimiento general sin relación
-        /capital de/,
-        /presidente de/,
-        /historia de/,
-        /cuando fue/,
-        /en qu[eé] a[ñn]o/,
-        
-        // Preguntas personales sin contexto empresarial
-        /cu[aá]ntos a[ñn]os tienes/,
-        /d[oó]nde vives/,
-        /tienes familia/,
-        /te gusta/,
-        
-        // Preguntas de entretenimiento
-        /cu[eé]ntame un chiste/,
-        /una historia/,
-        /recomienda una pel[ií]cula/,
-        /qu[eé] m[uú]sica/,
-        
-        // Saludos casuales sin intención clara
-        /qu[eé] tal el clima/,
-        /c[oó]mo est[aá] el d[ií]a/,
-        
-        // Preguntas existenciales o filosóficas
-        /cu[aá]l es el sentido/,
-        /por qu[eé] existimos/,
-        /qu[eé] es la vida/
-    ];
-    
-    // Verificar si el mensaje coincide con algún patrón
-    const isOffTopic = offTopicPatterns.some(pattern => pattern.test(messageLower));
-    
-    // Verificaciones adicionales
-    if (isOffTopic) {
-        return true;
-    }
-    
-    // Verificar preguntas muy cortas sin contexto empresarial
-    if (messageLower.length < 10) {
-        const businessKeywords = [
-            'erp', 'sistema', 'empresa', 'negocio', 'inventario', 'factura', 'contabilidad',
-            'prueba', 'demo', 'cuenta', 'usuario', 'precio', 'costo', 'soporte', 'ayuda'
-        ];
-        
-        const hasBusinessContext = businessKeywords.some(keyword => 
-            messageLower.includes(keyword)
-        );
-        
-        if (!hasBusinessContext && messageLower.includes('?')) {
-            return true;
-        }
-    }
-    
-    return false;
-};
-
-/**
- * Valida las intenciones detectadas contra el contexto conversacional
- * @param {Object} result - Resultado de detección de intenciones
- * @param {Object} context - Contexto conversacional
- * @param {string} message - Mensaje original
- * @returns {Object} - Resultado validado
- */
-const validateIntentsAgainstContext = (result, context, message) => {
-    if (!result.intents || result.intents.length === 0) {
-        return result;
-    }
-    
-    const messageLower = message.toLowerCase();
-    const validatedIntents = [];
-    
-    for (const intent of result.intents) {
-        let isValid = true;
-        
-        // Validar intención 'consulta_caracteristicas' 
-        if (intent === 'consulta_caracteristicas') {
-            const hasFeatureKeywords = [
-                'caracter', 'funciona', 'modulo', 'sistema', 'que hace', 'que tiene',
-                'incluye', 'capacidad', 'herramienta', 'opciones', 'servicio'
-            ].some(keyword => messageLower.includes(keyword));
-            
-            // Si no tiene palabras clave relacionadas con características del sistema
-            if (!hasFeatureKeywords) {
-                logger.debug(`Intención 'consulta_caracteristicas' invalidada para: "${message}"`);
-                isValid = false;
-            }
-        }
-        
-        // Validar intención 'saludo' para usuarios conocidos
-        if (intent === 'saludo' && context.userProfile && context.userProfile.isRegistered) {
-            const isSimpleGreeting = ['hola', 'buenos dias', 'buenas tardes', 'saludos'].some(
-                greeting => messageLower === greeting || messageLower.startsWith(greeting + ' ')
-            );
-            
-            // Si no es un saludo simple y el usuario ya está en conversación
-            if (!isSimpleGreeting && context.recentMessages && context.recentMessages.length > 2) {
-                logger.debug(`Intención 'saludo' invalidada para usuario conocido: "${message}"`);
-                isValid = false;
-            }
-        }
-        
-        if (isValid) {
-            validatedIntents.push(intent);
-        }
-    }
-    
-    return {
-        ...result,
-        intents: validatedIntents,
-        originalIntents: result.intents,
-        wasValidated: validatedIntents.length !== result.intents.length
-    };
 };
 
 /**
@@ -219,9 +65,12 @@ const extractEntitiesWithContext = async (message, phoneNumber, options = {}) =>
         // Obtener contexto conversacional
         const context = await getContextForPrompt(phoneNumber);
         
+        // Obtener entidades desde la base de datos
+        const nlpEntities = await entityService.getEntitiesForNLP();
+        
         // Configurar variables específicas para este prompt contextual
         const variables = {
-            supportedEntities: options.supportedEntities || ['nombre', 'email', 'usuario', 'clave', 'empresa', 'telefono', 'cargo', 'industria', 'numero_empleados'],
+            supportedEntities: options.supportedEntities || nlpEntities.supportedEntities,
             serviceType: options.serviceType || 'ERP',
             context: context
         };
@@ -275,7 +124,7 @@ const enrichEntitiesWithContext = (extractedEntities, context, message) => {
         }
     }
     
-    // Enriquecer empresa if no se detectó en el mensaje pero está en contexto
+    // Enriquecer empresa si no se detectó en el mensaje pero está en contexto
     if (!enrichedEntities.empresa && knownEntities.empresa) {
         if (shouldInferEntity(message, 'empresa')) {
             enrichedEntities.empresa = knownEntities.empresa;
@@ -345,7 +194,7 @@ const shouldInferEntity = (message, entityType) => {
  * @param {Object} context - Contexto conversacional
  * @returns {Object} - Análisis de coherencia
  */
-const analyzeContextualCoherence = (message, intents, context) => {
+const analyzeContextualCoherence = async (message, intents, context) => {
     const analysis = {
         isCoherent: true,
         coherenceScore: 1.0,
@@ -357,7 +206,7 @@ const analyzeContextualCoherence = (message, intents, context) => {
     try {
         // Analizar continuidad de tema
         if (context.currentTopic && intents.length > 0) {
-            const currentTopicIntents = getIntentsForTopic(context.currentTopic);
+            const currentTopicIntents = await getIntentsForTopic(context.currentTopic);
             const hasRelatedIntent = intents.some(intent => currentTopicIntents.includes(intent));
             
             if (!hasRelatedIntent) {
@@ -367,13 +216,8 @@ const analyzeContextualCoherence = (message, intents, context) => {
             }
         }
         
-        // Verificar si es una pregunta fuera de contexto
-        if (isOffTopicQuestion(message)) {
-            analysis.isCoherent = false;
-            analysis.coherenceScore = 0.1;
-            analysis.contextualClues.push('Pregunta fuera del contexto empresarial');
-            analysis.suggestions.push('Redirigir a funcionalidades del sistema');
-        }
+        // Analizar consistencia de entidades
+        // (Este análisis se realizaría comparando entidades actuales con las conocidas)
         
         // Analizar patrones de conversación
         if (context.recentIntents && context.recentIntents.length > 0) {
@@ -401,7 +245,7 @@ const analyzeContextualCoherence = (message, intents, context) => {
  * @param {string} topic - Tema actual
  * @returns {Array} - Intenciones relacionadas
  */
-const getIntentsForTopic = (topic) => {
+const getIntentsForTopic = async (topic) => {
     const topicIntentMapping = {
         'trial_request': ['solicitud_prueba', 'confirmacion', 'interes_en_servicio'],
         'technical_support': ['soporte_tecnico', 'queja'],
@@ -414,8 +258,18 @@ const getIntentsForTopic = (topic) => {
         'farewell': ['despedida', 'agradecimiento'],
         'gratitude': ['agradecimiento', 'despedida'],
         'confirmation': ['confirmacion'],
-        'general': intentConfig.supportedIntents // Todas las intenciones son válidas
+        'general': null // Se obtendrán todas las intenciones de la BD
     };
+    
+    if (topic === 'general' || !topicIntentMapping[topic]) {
+        try {
+            const nlpIntents = await intentService.getIntentsForNLP();
+            return nlpIntents.supportedIntents;
+        } catch (error) {
+            logger.error(`Error obteniendo intenciones de BD: ${error.message}`);
+            return [];
+        }
+    }
     
     return topicIntentMapping[topic] || [];
 };
@@ -428,10 +282,13 @@ const getIntentsForTopic = (topic) => {
  */
 const detectIntentsBasic = async (message, options = {}) => {
     try {
+        // Obtener intenciones desde la base de datos
+        const nlpIntents = await intentService.getIntentsForNLP();
+        
         const variables = {
-            supportedIntents: options.supportedIntents || intentConfig.supportedIntents,
-            intentExamples: options.intentExamples || intentConfig.intentExamples,
-            conversationExamples: options.conversationExamples || intentConfig.conversationExamples,
+            supportedIntents: options.supportedIntents || nlpIntents.supportedIntents,
+            intentExamples: options.intentExamples || nlpIntents.intentExamples,
+            conversationExamples: options.conversationExamples || nlpIntents.conversationExamples,
             serviceType: options.serviceType || 'ERP'
         };
 
@@ -450,8 +307,11 @@ const detectIntentsBasic = async (message, options = {}) => {
  */
 const extractEntitiesBasic = async (message, options = {}) => {
     try {
+        // Obtener entidades desde la base de datos
+        const nlpEntities = await entityService.getEntitiesForNLP();
+        
         const variables = {
-            supportedEntities: options.supportedEntities || ['nombre', 'email', 'usuario', 'clave', 'empresa', 'telefono', 'cargo', 'industria', 'numero_empleados'],
+            supportedEntities: options.supportedEntities || nlpEntities.supportedEntities,
             serviceType: options.serviceType || 'ERP'
         };
 
@@ -468,41 +328,19 @@ const extractEntitiesBasic = async (message, options = {}) => {
  * @param {Object} context - Contexto conversacional
  * @returns {string|null} - Intención principal contextual
  */
-const getPrimaryIntentWithContext = (intents, context) => {
+const getPrimaryIntentWithContext = async (intents, context) => {
     if (!intents || intents.length === 0) {
         return null;
     }
 
     // Si hay contexto de tema actual, priorizar intenciones relacionadas
     if (context.currentTopic) {
-        const topicIntents = getIntentsForTopic(context.currentTopic);
+        const topicIntents = await getIntentsForTopic(context.currentTopic);
         const contextualIntent = intents.find(intent => topicIntents.includes(intent));
         
         if (contextualIntent) {
             logger.debug(`Intención contextual seleccionada: ${contextualIntent} para tema: ${context.currentTopic}`);
             return contextualIntent;
-        }
-    }
-
-    // Si hay múltiples intenciones, considerar el contexto conversacional
-    if (intents.length > 1) {
-        // Si hay confirmacion + solicitud_prueba, priorizar solicitud_prueba
-        if (intents.includes('confirmacion') && intents.includes('solicitud_prueba')) {
-            return 'solicitud_prueba';
-        }
-        
-        // Si hay confirmacion + interes_en_servicio en contexto de servicio, interpretar como solicitud_prueba
-        if (intents.includes('confirmacion') && intents.includes('interes_en_servicio') && 
-            context.currentTopic === 'service_interest') {
-            return 'solicitud_prueba';
-        }
-        
-        // Si solo hay confirmacion pero el contexto reciente incluye solicitud de prueba
-        if (intents.includes('confirmacion')) {
-            const recentIntents = context.recentIntents || [];
-            if (recentIntents.includes('interes_en_servicio') || recentIntents.includes('solicitud_prueba')) {
-                return 'solicitud_prueba';
-            }
         }
     }
 
@@ -536,7 +374,7 @@ const getPrimaryIntentWithContext = (intents, context) => {
  * @param {Object} context - Contexto conversacional
  * @returns {Object} - Información sobre cambio de contexto
  */
-const detectContextChange = (currentIntents, context) => {
+const detectContextChange = async (currentIntents, context) => {
     const change = {
         hasChanged: false,
         previousTopic: context.currentTopic,
@@ -556,7 +394,7 @@ const detectContextChange = (currentIntents, context) => {
     if (context.currentTopic && context.currentTopic !== newTopic) {
         change.hasChanged = true;
         change.suggestedTopic = newTopic;
-        change.confidence = calculateTopicChangeConfidence(currentIntents, context);
+        change.confidence = await calculateTopicChangeConfidence(currentIntents, context);
         change.reason = `Cambio de ${context.currentTopic} a ${newTopic}`;
         
         logger.info(`Cambio de contexto detectado: ${change.reason} (confianza: ${change.confidence})`);
@@ -576,7 +414,7 @@ const detectContextChange = (currentIntents, context) => {
  * @param {Object} context - Contexto conversacional
  * @returns {number} - Confianza (0-1)
  */
-const calculateTopicChangeConfidence = (intents, context) => {
+const calculateTopicChangeConfidence = async (intents, context) => {
     let confidence = 0.5; // Base
     
     // Aumentar confianza si hay intenciones fuertes de cambio
@@ -592,7 +430,7 @@ const calculateTopicChangeConfidence = (intents, context) => {
     
     // Aumentar confianza si hay múltiples intenciones del nuevo tema
     const newTopic = determineTopicFromIntents(intents);
-    const newTopicIntents = getIntentsForTopic(newTopic);
+    const newTopicIntents = await getIntentsForTopic(newTopic);
     const matchingIntents = intents.filter(intent => newTopicIntents.includes(intent));
     
     if (matchingIntents.length > 1) {
@@ -640,38 +478,7 @@ const determineTopicFromIntents = (intents) => {
     return 'general';
 };
 
-const { hybridEntityExtraction } = require('./credentialExtractor');
-
-/**
- * NUEVA FUNCIÓN: Extrae entidades con fallback de patrones
- * Reemplaza la función extractEntitiesWithContext existente
- */
-const extractEntitiesWithContextImproved = async (message, phoneNumber, options = {}) => {
-    try {
-        logger.debug(`🔄 Extrayendo entidades mejoradas de: "${message}"`);
-        
-        // Función original de Ollama
-        const originalExtractor = async (msg) => {
-            return await extractEntitiesWithContext(msg, phoneNumber, options);
-        };
-        
-        // Usar extracción híbrida
-        const entities = await hybridEntityExtraction(message, originalExtractor);
-        
-        logger.info(`✅ Entidades extraídas (mejoradas): ${JSON.stringify(entities)}`);
-        return entities;
-        
-    } catch (error) {
-        logger.error(`❌ Error en extracción mejorada: ${error.message}`);
-        // Fallback: usar solo patrones
-        const { extractCredentialsRobust } = require('./credentialExtractor');
-        return extractCredentialsRobust(message);
-    }
-};
-
 module.exports = {
-    // ... todas las exportaciones existentes
-    extractEntitiesWithContextImproved,  // AGREGAR ESTA LÍNEA
     detectIntentsWithContext,
     extractEntitiesWithContext,
     enrichEntitiesWithContext,
@@ -680,8 +487,7 @@ module.exports = {
     detectContextChange,
     determineTopicFromIntents,
     calculateTopicChangeConfidence,
-    isOffTopicQuestion,
-    validateIntentsAgainstContext,
+    // Métodos de fallback
     detectIntentsBasic,
     extractEntitiesBasic
 };

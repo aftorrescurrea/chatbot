@@ -59,7 +59,7 @@ const CredentialSchema = new Schema({
 
 // Índices para mejorar el rendimiento de las consultas
 CredentialSchema.index({ userId: 1 });
-CredentialSchema.index({ username: 1 });
+// El índice en 'username' ya está definido con unique: true
 CredentialSchema.index({ expirationDate: 1 });
 CredentialSchema.index({ serviceId: 1 });
 

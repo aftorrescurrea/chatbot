@@ -28,9 +28,15 @@ const connectDB = async () => {
         
         logger.info(`MongoDB conectado: ${conn.connection.host}`);
         
-        // Verificar la conexión
-        await mongoose.connection.db.admin().ping();
-        logger.info('Verificación de conexión MongoDB exitosa (ping)');
+        // Verificar la conexión solo si está disponible
+        if (mongoose.connection.db) {
+            try {
+                await mongoose.connection.db.admin().ping();
+                logger.info('Verificación de conexión MongoDB exitosa (ping)');
+            } catch (pingError) {
+                logger.warn('No se pudo hacer ping a MongoDB, pero la conexión parece establecida');
+            }
+        }
     } catch (error) {
         logger.error(`Error al conectar a MongoDB: ${error.message}`);
         logger.error(error.stack);

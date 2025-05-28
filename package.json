@@ -2,17 +2,22 @@
   "name": "whatsapp-erp-chatbot",
   "version": "1.0.0",
   "description": "Chatbot de WhatsApp para gestión de acceso a pruebas de ERP",
-  "main": "index.js",
+  "main": "app.js",
   "scripts": {
-    "start": "node index.js",
-    "dev": "nodemon --legacy-watch --ignore whatsapp-session/ --ignore node_modules/ index.js",
+    "start": "node app.js",
+    "start:bot": "node index.js",
+    "start:api": "node -e \"require('./src/server').startServer()\"",
+    "dev": "nodemon --legacy-watch --ignore whatsapp-session/ --ignore node_modules/ app.js",
+    "dev:bot": "nodemon --legacy-watch --ignore whatsapp-session/ --ignore node_modules/ index.js",
+    "dev:api": "nodemon --legacy-watch src/server.js",
     "test": "echo \"Error: no test specified\" && exit 1",
     "init-db": "node scripts/init-db.js",
     "manage-db": "node scripts/manage-db.js",
     "list-users": "node scripts/manage-db.js list-users",
     "db-status": "node scripts/manage-db.js status",
     "backup-db": "node scripts/backup-db.js",
-    "restore-db": "node scripts/restore-db.js"
+    "restore-db": "node scripts/restore-db.js",
+    "migrate": "node scripts/migrate-intents-entities.js"
   },
   "keywords": [
     "whatsapp",
@@ -25,7 +30,9 @@
   "license": "ISC",
   "dependencies": {
     "bcrypt": "^5.1.1",
+    "cors": "^2.8.5",
     "dotenv": "^16.3.1",
+    "express": "^4.18.2",
     "mongoose": "^8.0.0",
     "node-fetch": "^2.7.0",
     "qrcode-terminal": "^0.12.0",

@@ -62,9 +62,7 @@ const UserSchema = new Schema({
     timestamps: true // Añade createdAt y updatedAt automáticamente
 });
 
-// Índices para mejorar el rendimiento de las consultas
-UserSchema.index({ phone: 1 });
-UserSchema.index({ email: 1 });
+// Los índices en 'phone' y 'email' ya están definidos con unique: true
 // Ya no necesitamos el índice para conversationHistory
 
 module.exports = mongoose.model('User', UserSchema);

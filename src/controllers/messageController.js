@@ -1,10 +1,10 @@
 /**
- * Controlador mejorado para manejo de mensajes de WhatsApp
- * Incluye memoria conversacional y procesamiento contextual mejorado
+ * Controlador mejorado para manejo de mensajes de WhatsApp (CORREGIDO)
+ * Incluye memoria conversacional y procesamiento contextual
  */
 
 const { detectIntentsWithContext, getPrimaryIntentWithContext, detectContextChange } = require('../services/nlpService');
-const { extractEntitiesWithContextImproved } = require('../services/nlpService');
+const { extractEntitiesWithContext } = require('../services/nlpService');
 const { generateResponse } = require('../services/responseService');
 const { createOrUpdateUser, findUserByPhone } = require('../services/userService');
 const { createCredentials } = require('../services/credentialService');
@@ -19,11 +19,10 @@ const { logger } = require('../utils/logger');
 const { generalConfig } = require('../config/promptConfig');
 
 // Almacenamiento en memoria para el estado de las conversaciones activas
-// Esto complementa la memoria conversacional con estados específicos de flujos
 const activeFlowStates = new Map();
 
 /**
- * Maneja los mensajes entrantes de WhatsApp con capacidades contextuales mejoradas
+ * Maneja los mensajes entrantes de WhatsApp con capacidades contextuales
  * @param {Object} client - Cliente de WhatsApp
  * @param {Object} message - Mensaje recibido
  */
@@ -42,29 +41,13 @@ const handleMessage = async (client, message) => {
         
         // Detectar intenciones con contexto conversacional
         const intentResult = await detectIntentsWithContext(body, from);
-        const { intents, contextUsed, topicContinuity, isOffTopic } = intentResult;
+        const { intents, contextUsed, topicContinuity } = intentResult;
         
         logger.info(`Intenciones detectadas: ${JSON.stringify(intents)} (contexto: ${contextUsed ? 'sí' : 'no'})`);
         
-        // Si es una pregunta fuera de contexto, manejar especialmente
-        if (isOffTopic) {
-            logger.info(`Pregunta fuera de contexto detectada para ${from}`);
-            const offTopicResponse = await generateOffTopicResponseForUser(body, user, conversationMemory, from);
-            await client.sendMessage(from, offTopicResponse);
-            logger.info(`Respuesta fuera de contexto enviada a ${from}: ${offTopicResponse}`);
-            
-            // Guardar mensaje pero no actualizar memoria conversacional con intenciones incorrectas
-            await saveMessage(user?._id || null, from, body, true);
-            await saveMessage(user?._id || null, from, offTopicResponse, false);
-            return;
-        }
-        
-        // Extraer entidades con contexto conversacional solo si hay intenciones válidas
-        let entities = {};
-        if (intents && intents.length > 0) {
-            entities = await extractEntitiesWithContextImproved(body, from);
-            logger.info(`Entidades extraídas: ${JSON.stringify(entities)}`);
-        }
+        // Extraer entidades con contexto conversacional
+        const entities = await extractEntitiesWithContext(body, from);
+        logger.info(`Entidades extraídas: ${JSON.stringify(entities)}`);
         
         // Detectar cambios de contexto
         const contextChange = detectContextChange(intents, conversationMemory.conversationContext);
@@ -109,28 +92,32 @@ const handleMessage = async (client, message) => {
         // Preparar el contexto de la conversación mejorado
         const conversationContext = await buildEnhancedConversationContext(from, updatedMemory, contextChange);
         
-        // Agregar información de pregunta fuera de contexto al contexto
-        conversationContext.isOffTopic = isOffTopic;
+        // Procesar intenciones y manejar flujos (AHORA RETORNA CREDENCIALES SI SE COMPLETÓ)
+        logger.debug(`Procesando intenciones con contexto para ${from}`);
+        const flowResult = await processIntentsWithContext(intents, entities, user, from, conversationContext, contextChange);
+        logger.debug(`Resultado del flujo: ${JSON.stringify(flowResult)}`);
         
-        // Procesar intenciones y manejar flujos
-        await processIntentsWithContext(intents, entities, user, from, conversationContext, contextChange);
-        
-        // Generar respuesta contextual
+        // Generar respuesta contextual (INCLUYENDO CREDENCIALES SI ESTÁN DISPONIBLES)
         const response = await generateContextualResponse(
             body,
             intents,
             entities,
             user,
             conversationContext,
-            updatedMemory
+            updatedMemory,
+            flowResult // <- NUEVO PARÁMETRO CON RESULTADOS DEL FLUJO
         );
         
         // Enviar respuesta al usuario
         await client.sendMessage(from, response);
         logger.info(`Respuesta enviada a ${from}: ${response}`);
         
-        // Guardar la respuesta en el historial y actualizar memoria
-        await saveMessage(user?._id || null, from, response, false);
+        // Guardar la respuesta en el historial SOLO si hay un usuario válido
+        if (user && user._id) {
+            await saveMessage(user._id, from, response, false);
+        } else {
+            logger.debug(`No se guardó el mensaje de respuesta - usuario temporal para ${from}`);
+        }
         
         // Actualizar memoria con la respuesta del bot
         await updateConversationMemory(from, {
@@ -161,60 +148,6 @@ const handleMessage = async (client, message) => {
 };
 
 /**
- * Genera respuesta específica para preguntas fuera de contexto
- * @param {string} message - Mensaje del usuario
- * @param {Object} user - Usuario (si existe)
- * @param {Object} conversationMemory - Memoria conversacional
- * @param {string} phoneNumber - Número de teléfono
- * @returns {string} - Respuesta generada
- */
-const generateOffTopicResponseForUser = async (message, user, conversationMemory, phoneNumber) => {
-    try {
-        const userName = user ? user.name : (conversationMemory.userProfile?.name || null);
-        const hasActiveFlow = activeFlowStates.has(phoneNumber);
-        const currentTopic = conversationMemory.conversationContext?.currentTopic;
-        
-        let response = '';
-        
-        if (userName && userName !== 'Usuario') {
-            response = `Hola ${userName}, `;
-        } else {
-            response = 'Hola, ';
-        }
-        
-        // Respuesta amigable pero redirigiendo al contexto empresarial
-        response += 'esa es una pregunta interesante, pero soy un asistente especializado en ';
-        response += `${generalConfig.serviceMetadata.name}. `;
-        
-        // Si hay un flujo activo, recordar el proceso
-        if (hasActiveFlow) {
-            const activeFlow = activeFlowStates.get(phoneNumber);
-            if (activeFlow.flowType === 'trial_request') {
-                response += `¿Te gustaría continuar con tu solicitud de cuenta de prueba? `;
-                response += 'Estaba esperando algunos datos para completar tu registro.';
-            } else {
-                response += '¿En qué más puedo ayudarte con nuestro sistema?';
-            }
-        } else if (currentTopic === 'trial_request') {
-            response += '¿Te gustaría saber más sobre nuestro sistema ERP o crear una cuenta de prueba?';
-        } else {
-            // Ofrecer opciones principales
-            response += 'Puedo ayudarte con:\n';
-            response += '• Información sobre nuestro sistema ERP\n';
-            response += '• Crear una cuenta de prueba gratuita (7 días)\n';
-            response += '• Resolver dudas técnicas\n';
-            response += '• Información de precios y características\n\n';
-            response += '¿En qué te puedo ayudar?';
-        }
-        
-        return response;
-    } catch (error) {
-        logger.error(`Error generando respuesta fuera de contexto: ${error.message}`);
-        return 'Disculpa, soy un asistente especializado en sistemas ERP. ¿En qué puedo ayudarte con nuestro servicio?';
-    }
-};
-
-/**
  * Actualiza la información del usuario con las entidades detectadas
  * @param {Object} existingUser - Usuario existente (puede ser null)
  * @param {string} phoneNumber - Número de teléfono
@@ -223,6 +156,12 @@ const generateOffTopicResponseForUser = async (message, user, conversationMemory
  */
 const updateUserWithEntities = async (existingUser, phoneNumber, entities) => {
     try {
+        // Solo crear/actualizar usuario si tenemos información mínima necesaria
+        if (!entities.nombre && !entities.email && !existingUser) {
+            logger.debug(`No se creará usuario - información insuficiente para ${phoneNumber}`);
+            return null;
+        }
+        
         const userData = {
             phone: phoneNumber,
             name: entities.nombre || (existingUser ? existingUser.name : 'Usuario'),
@@ -256,16 +195,18 @@ const updateUserWithEntities = async (existingUser, phoneNumber, entities) => {
 const buildEnhancedConversationContext = async (phoneNumber, memory, contextChange) => {
     const activeFlow = activeFlowStates.get(phoneNumber);
     
+    if (activeFlow) {
+        logger.debug(`Flujo activo encontrado para ${phoneNumber}: ${JSON.stringify(activeFlow)}`);
+    }
+    
     return {
         // Información de memoria conversacional
         userProfile: memory.userProfile,
         knownEntities: memory.knownEntities,
-        userKnowledge: memory.knownEntities, // Alias para compatibilidad
         currentTopic: memory.conversationContext.currentTopic,
         topicHistory: memory.topicHistory,
         contextStrength: memory.conversationContext.contextStrength,
         recentMessages: memory.messageHistory.slice(-5),
-        conversationHistory: memory.messageHistory.slice(-3), // Alias para compatibilidad
         recentIntents: memory.intentHistory.slice(0, 3).map(item => item.intent),
         
         // Información de cambio de contexto
@@ -282,16 +223,7 @@ const buildEnhancedConversationContext = async (phoneNumber, memory, contextChan
         
         // Metadatos adicionales
         conversationAge: new Date() - new Date(memory.createdAt),
-        conversationLength: new Date() - new Date(memory.createdAt), // Alias para compatibilidad
-        lastActivity: memory.lastUpdate,
-        
-        // Pistas contextuales para el análisis
-        contextualClues: {
-            hasUserProfile: memory.userProfile.isRegistered,
-            knownEntitiesCount: Object.keys(memory.knownEntities).length,
-            conversationLength: memory.messageHistory.length,
-            topicStability: memory.conversationContext.contextStrength
-        }
+        lastActivity: memory.lastUpdate
     };
 };
 
@@ -303,13 +235,26 @@ const buildEnhancedConversationContext = async (phoneNumber, memory, contextChan
  * @param {string} phoneNumber - Número de teléfono
  * @param {Object} conversationContext - Contexto de la conversación
  * @param {Object} contextChange - Información sobre cambio de contexto
+ * @returns {Object} - Resultado del procesamiento (incluyendo credenciales si se crearon)
  */
 const processIntentsWithContext = async (intents, entities, user, phoneNumber, conversationContext, contextChange) => {
     try {
+        logger.debug(`=== INICIANDO processIntentsWithContext ===`);
+        logger.debug(`Intenciones recibidas: ${JSON.stringify(intents)}`);
+        logger.debug(`Entidades recibidas: ${JSON.stringify(entities)}`);
+        logger.debug(`¿Hay flujo activo?: ${conversationContext.activeFlow ? 'SÍ' : 'NO'}`);
+        
+        const result = {
+            completed: false,
+            credentials: null,
+            flowType: null
+        };
+        
         // Si hay un flujo activo y no ha habido cambio de contexto significativo
         if (conversationContext.activeFlow && !contextChange.hasChanged) {
-            await continueActiveFlow(phoneNumber, intents, entities, conversationContext);
-            return;
+            logger.debug(`Continuando flujo activo para ${phoneNumber}`);
+            const flowResult = await continueActiveFlow(phoneNumber, intents, entities, conversationContext);
+            return { ...result, ...flowResult };
         }
         
         // Si hay cambio de contexto, evaluar si limpiar flujo activo
@@ -319,45 +264,43 @@ const processIntentsWithContext = async (intents, entities, user, phoneNumber, c
         }
         
         // Determinar la intención principal considerando el contexto
-        const primaryIntent = getPrimaryIntentWithContext(intents, conversationContext);
+        const primaryIntent = await getPrimaryIntentWithContext(intents, conversationContext);
+        logger.debug(`Intención principal obtenida: "${primaryIntent}" (tipo: ${typeof primaryIntent})`);
         
-        if (!primaryIntent) return;
-        
-        // Para confirmaciones, verificar si debería ser interpretada como solicitud de prueba
-        let effectiveIntent = primaryIntent;
-        if (primaryIntent === 'confirmacion') {
-            // Verificar contexto reciente para determinar qué se está confirmando
-            const recentIntents = conversationContext.recentIntents || [];
-            const currentTopic = conversationContext.currentTopic;
-            
-            if (currentTopic === 'service_interest' || recentIntents.includes('interes_en_servicio')) {
-                effectiveIntent = 'solicitud_prueba';
-                logger.info(`Confirmación interpretada como solicitud_prueba debido al contexto de ${currentTopic}`);
-            }
+        if (!primaryIntent) {
+            logger.debug(`No se encontró intención principal, retornando resultado vacío`);
+            return result;
         }
         
-        // Iniciar nuevo flujo basado en la intención efectiva
-        switch (effectiveIntent) {
+        logger.info(`*** EJECUTANDO SWITCH PARA INTENCIÓN: "${primaryIntent}" ***`);
+        
+        // Iniciar nuevo flujo basado en la intención principal
+        switch (primaryIntent) {
             case 'solicitud_prueba':
-                await startTrialRequestFlowWithContext(entities, user, phoneNumber, conversationContext);
-                break;
+                logger.info(`*** ENTRANDO A CASE solicitud_prueba ***`);
+                const trialResult = await startTrialRequestFlowWithContext(entities, user, phoneNumber, conversationContext);
+                logger.info(`*** RESULTADO DEL FLUJO DE PRUEBA: ${JSON.stringify(trialResult)} ***`);
+                return { ...result, ...trialResult };
                 
             case 'soporte_tecnico':
                 await startSupportFlowWithContext(entities, user, phoneNumber, conversationContext);
+                result.flowType = 'support_request';
                 break;
                 
             case 'confirmacion':
-                await handleConfirmationWithContext(entities, user, phoneNumber, conversationContext);
-                break;
+                const confirmResult = await handleConfirmationWithContext(entities, user, phoneNumber, conversationContext);
+                return { ...result, ...confirmResult };
                 
-            // Otros flujos pueden agregarse aquí
             default:
-                // Para intenciones que no requieren flujo específico, no hacer nada especial
+                logger.debug(`Intención "${primaryIntent}" no tiene un flujo específico definido`);
                 break;
         }
         
+        return result;
     } catch (error) {
         logger.error(`Error al procesar intenciones con contexto: ${error.message}`);
+        logger.error(error.stack);
+        return { completed: false, credentials: null, flowType: null };
     }
 };
 
@@ -367,9 +310,16 @@ const processIntentsWithContext = async (intents, entities, user, phoneNumber, c
  * @param {Object} user - Usuario (si existe)
  * @param {string} phoneNumber - Número de teléfono
  * @param {Object} conversationContext - Contexto de la conversación
+ * @returns {Object} - Resultado del flujo
  */
 const startTrialRequestFlowWithContext = async (entities, user, phoneNumber, conversationContext) => {
     try {
+        const result = {
+            completed: false,
+            credentials: null,
+            flowType: 'trial_request'
+        };
+        
         // Combinar entidades actuales con información conocida del contexto
         const allKnownData = {
             ...conversationContext.knownEntities,
@@ -383,6 +333,11 @@ const startTrialRequestFlowWithContext = async (entities, user, phoneNumber, con
             } : {})
         };
         
+        logger.debug(`=== DATOS PARA SOLICITUD DE PRUEBA ===`);
+        logger.debug(`Entidades actuales: ${JSON.stringify(entities)}`);
+        logger.debug(`Entidades conocidas del contexto: ${JSON.stringify(conversationContext.knownEntities)}`);
+        logger.debug(`Datos combinados: ${JSON.stringify(allKnownData)}`);
+        
         // Determinar qué información falta
         const missingFields = [];
         if (!allKnownData.nombre) missingFields.push('nombre');
@@ -390,28 +345,37 @@ const startTrialRequestFlowWithContext = async (entities, user, phoneNumber, con
         if (!allKnownData.usuario) missingFields.push('usuario');
         if (!allKnownData.clave) missingFields.push('clave');
         
-        // Solo iniciar flujo si falta información
-        if (missingFields.length > 0) {
-            setActiveFlowState(phoneNumber, {
-                flowType: 'trial_request',
-                currentStep: 0,
-                missingFields: missingFields,
-                collectedData: allKnownData,
-                flowData: {
-                    missingFields: missingFields,
-                    ...allKnownData
-                },
-                startTime: new Date()
-            });
+        logger.debug(`Campos faltantes: ${JSON.stringify(missingFields)}`);
+        
+        // Si tenemos toda la información, procesar inmediatamente
+        if (missingFields.length === 0) {
+            logger.info(`Procesando solicitud de prueba completa para ${phoneNumber}`);
+            const credentials = await processCompletedTrialRequest(phoneNumber, allKnownData);
+            clearActiveFlowState(phoneNumber);
             
-            logger.info(`Flujo de solicitud de prueba iniciado para ${phoneNumber}. Faltan: ${missingFields.join(', ')}`);
-        } else {
-            // Si tenemos toda la información, procesar inmediatamente
-            await processCompletedTrialRequest(phoneNumber, allKnownData);
+            result.completed = true;
+            result.credentials = credentials;
+            
+            logger.info(`Solicitud de prueba completada inmediatamente para ${phoneNumber}`);
+            return result;
         }
+        
+        // Si falta información, iniciar flujo
+        setActiveFlowState(phoneNumber, {
+            flowType: 'trial_request',
+            currentStep: 0,
+            missingFields: missingFields,
+            collectedData: allKnownData,
+            startTime: new Date()
+        });
+        
+        logger.info(`Flujo de solicitud de prueba iniciado para ${phoneNumber}. Faltan: ${missingFields.join(', ')}`);
+        return result;
         
     } catch (error) {
         logger.error(`Error al iniciar flujo de solicitud de prueba: ${error.message}`);
+        logger.error(error.stack);
+        return { completed: false, credentials: null, flowType: 'trial_request' };
     }
 };
 
@@ -430,9 +394,6 @@ const startSupportFlowWithContext = async (entities, user, phoneNumber, conversa
             issueDescription: entities.problema || '',
             userInfo: user || conversationContext.userProfile,
             collectedData: entities,
-            flowData: {
-                issueDescription: entities.problema || ''
-            },
             startTime: new Date()
         });
         
@@ -448,19 +409,28 @@ const startSupportFlowWithContext = async (entities, user, phoneNumber, conversa
  * @param {Object} user - Usuario (si existe)
  * @param {string} phoneNumber - Número de teléfono
  * @param {Object} conversationContext - Contexto de la conversación
+ * @returns {Object} - Resultado del manejo de confirmación
  */
 const handleConfirmationWithContext = async (entities, user, phoneNumber, conversationContext) => {
     try {
+        const result = {
+            completed: false,
+            credentials: null,
+            flowType: 'confirmation'
+        };
+        
         const activeFlow = conversationContext.activeFlow;
         
         if (activeFlow && activeFlow.flowType === 'trial_request') {
             // Si hay un flujo de prueba activo, continuar con la confirmación
-            await continueTrialRequestFlow(phoneNumber, entities, conversationContext);
+            const flowResult = await continueTrialRequestFlow(phoneNumber, entities, conversationContext);
+            return { ...result, ...flowResult };
         }
-        // Podrían agregarse otros tipos de confirmación contextual aquí
         
+        return result;
     } catch (error) {
         logger.error(`Error al manejar confirmación con contexto: ${error.message}`);
+        return { completed: false, credentials: null, flowType: 'confirmation' };
     }
 };
 
@@ -470,22 +440,29 @@ const handleConfirmationWithContext = async (entities, user, phoneNumber, conver
  * @param {Array} intents - Intenciones detectadas
  * @param {Object} entities - Entidades extraídas
  * @param {Object} conversationContext - Contexto de la conversación
+ * @returns {Object} - Resultado del flujo
  */
 const continueActiveFlow = async (phoneNumber, intents, entities, conversationContext) => {
-    const activeFlow = conversationContext.activeFlow;
+    const result = {
+        completed: false,
+        credentials: null,
+        flowType: conversationContext.activeFlow.flowType
+    };
     
-    switch (activeFlow.flowType) {
+    switch (conversationContext.activeFlow.flowType) {
         case 'trial_request':
-            await continueTrialRequestFlow(phoneNumber, entities, conversationContext);
-            break;
+            const trialResult = await continueTrialRequestFlow(phoneNumber, entities, conversationContext);
+            return { ...result, ...trialResult };
             
         case 'support_request':
             await continueSupportFlow(phoneNumber, entities, conversationContext);
             break;
             
         default:
-            logger.warn(`Tipo de flujo desconocido: ${activeFlow.flowType}`);
+            logger.warn(`Tipo de flujo desconocido: ${conversationContext.activeFlow.flowType}`);
     }
+    
+    return result;
 };
 
 /**
@@ -493,118 +470,76 @@ const continueActiveFlow = async (phoneNumber, intents, entities, conversationCo
  * @param {string} phoneNumber - Número de teléfono
  * @param {Object} entities - Entidades extraídas
  * @param {Object} conversationContext - Contexto de la conversación
+ * @returns {Object} - Resultado del flujo
  */
 const continueTrialRequestFlow = async (phoneNumber, entities, conversationContext) => {
     try {
+        const result = {
+            completed: false,
+            credentials: null
+        };
+        
         const activeFlow = activeFlowStates.get(phoneNumber);
-        if (!activeFlow) return;
+        if (!activeFlow) return result;
         
-        logger.debug(`🔄 Continuando flujo de prueba para ${phoneNumber}`);
-        logger.debug(`📝 Datos actuales del flujo: ${JSON.stringify(activeFlow.collectedData)}`);
-        logger.debug(`🆕 Nuevas entidades: ${JSON.stringify(entities)}`);
-        
-        // Actualizar datos recolectados con las nuevas entidades
+        // Actualizar datos recolectados
         activeFlow.collectedData = {
             ...activeFlow.collectedData,
             ...entities
         };
         
-        activeFlow.flowData = {
-            ...activeFlow.flowData,
-            ...entities
-        };
-        
-        // Calcular campos faltantes con lógica mejorada
-        const missingFields = calculateMissingFields(activeFlow.collectedData);
-        
-        logger.info(`📊 Estado del flujo después de actualización:`);
-        logger.info(`   - Datos recolectados: ${JSON.stringify(activeFlow.collectedData)}`);
-        logger.info(`   - Campos faltantes: ${JSON.stringify(missingFields)}`);
+        // Verificar si ahora tenemos toda la información
+        const missingFields = [];
+        if (!activeFlow.collectedData.nombre) missingFields.push('nombre');
+        if (!activeFlow.collectedData.email) missingFields.push('email');
+        if (!activeFlow.collectedData.usuario) missingFields.push('usuario');
+        if (!activeFlow.collectedData.clave) missingFields.push('clave');
         
         if (missingFields.length === 0) {
-            // ✅ Flujo completado - procesar solicitud
-            logger.info(`🎉 Flujo de solicitud de prueba completado para ${phoneNumber}`);
-            await processCompletedTrialRequest(phoneNumber, activeFlow.collectedData);
+            // Procesar solicitud completa
+            logger.info(`Procesando solicitud de prueba completa en continueTrialRequestFlow para ${phoneNumber}`);
+            const credentials = await processCompletedTrialRequest(phoneNumber, activeFlow.collectedData);
             clearActiveFlowState(phoneNumber);
+            
+            result.completed = true;
+            result.credentials = credentials;
+            
+            logger.info(`Flujo de solicitud de prueba completado para ${phoneNumber}`);
         } else {
-            // ⏳ Aún faltan campos - actualizar flujo
+            // Actualizar campos faltantes y avanzar paso
             activeFlow.missingFields = missingFields;
-            activeFlow.flowData.missingFields = missingFields;
             activeFlow.currentStep++;
             activeFlowStates.set(phoneNumber, activeFlow);
-            
-            logger.info(`⏳ Flujo actualizado - Siguiente paso: solicitar ${missingFields[0]}`);
         }
         
+        return result;
     } catch (error) {
-        logger.error(`❌ Error al continuar flujo de solicitud de prueba: ${error.message}`);
+        logger.error(`Error al continuar flujo de solicitud de prueba: ${error.message}`);
+        logger.error(error.stack);
+        return { completed: false, credentials: null };
     }
-};
-
-
-/**
- * Calcula qué campos faltan para completar el registro
- * @param {Object} collectedData - Datos recolectados hasta ahora
- * @returns {Array} - Lista de campos faltantes
- */
-const calculateMissingFields = (collectedData) => {
-    const missingFields = [];
-    
-    // Validar nombre
-    if (!collectedData.nombre || 
-        collectedData.nombre === 'Usuario' ||
-        collectedData.nombre.toLowerCase().includes('quiero') ||
-        collectedData.nombre.toLowerCase().includes('prueba')) {
-        missingFields.push('nombre');
-    }
-    
-    // Validar email
-    if (!collectedData.email || 
-        collectedData.email.includes('@temp.com') || 
-        !collectedData.email.includes('@') ||
-        !collectedData.email.includes('.')) {
-        missingFields.push('email');
-    }
-    
-    // Validar usuario
-    if (!collectedData.usuario) {
-        missingFields.push('usuario');
-    }
-    
-    // Validar clave
-    if (!collectedData.clave) {
-        missingFields.push('clave');
-    }
-    
-    return missingFields;
 };
 
 /**
  * Continúa el flujo de soporte técnico
  * @param {string} phoneNumber - Número de teléfono
  * @param {Object} entities - Entidades extraídas
- * @param {Object} conversationContext - Contexto de conversación
+ * @param {Object} conversationContext - Contexto de la conversación
  */
 const continueSupportFlow = async (phoneNumber, entities, conversationContext) => {
     try {
         const activeFlow = activeFlowStates.get(phoneNumber);
         if (!activeFlow) return;
         
-        // Actualizar información del problema
+        // Actualizar datos del problema
         if (entities.problema) {
             activeFlow.issueDescription += ' ' + entities.problema;
-            activeFlow.flowData.issueDescription = activeFlow.issueDescription;
         }
         
-        // Avanzar en el flujo
         activeFlow.currentStep++;
         activeFlowStates.set(phoneNumber, activeFlow);
         
-        // Si hemos recolectado suficiente información, finalizar flujo
-        if (activeFlow.currentStep >= 2 || activeFlow.issueDescription.length > 50) {
-            clearActiveFlowState(phoneNumber);
-        }
-        
+        logger.info(`Flujo de soporte actualizado para ${phoneNumber}`);
     } catch (error) {
         logger.error(`Error al continuar flujo de soporte: ${error.message}`);
     }
@@ -614,9 +549,13 @@ const continueSupportFlow = async (phoneNumber, entities, conversationContext) =
  * Procesa una solicitud de prueba completada
  * @param {string} phoneNumber - Número de teléfono
  * @param {Object} data - Datos completos recolectados
+ * @returns {Object} - Credenciales creadas
  */
 const processCompletedTrialRequest = async (phoneNumber, data) => {
     try {
+        logger.info(`Iniciando processCompletedTrialRequest para ${phoneNumber}`);
+        logger.debug(`Datos recibidos: ${JSON.stringify(data)}`);
+        
         // Crear o actualizar usuario
         const user = await createOrUpdateUser({
             phone: phoneNumber,
@@ -626,12 +565,25 @@ const processCompletedTrialRequest = async (phoneNumber, data) => {
             cargo: data.cargo || null
         });
         
-        // Crear credenciales
-        await createCredentials(user, data.usuario, data.clave, 'erp');
+        logger.info(`Usuario creado/actualizado: ${user._id}`);
         
-        logger.info(`Solicitud de prueba completada para usuario: ${user._id} (${data.nombre})`);
+        // Crear credenciales Y RETORNARLAS
+        logger.info(`Creando credenciales para usuario ${user._id} con username: ${data.usuario}`);
+        const credentials = await createCredentials(user, data.usuario, data.clave, 'erp');
+        
+        logger.info(`Credenciales creadas exitosamente para usuario: ${user._id} (${data.nombre})`);
+        
+        // IMPORTANTE: Retornar las credenciales para incluirlas en la respuesta
+        return {
+            username: credentials.username,
+            password: credentials.password,
+            userEmail: user.email,
+            userName: user.name,
+            expirationDate: credentials.expirationDate
+        };
     } catch (error) {
         logger.error(`Error al procesar solicitud de prueba completada: ${error.message}`);
+        logger.error(error.stack);
         throw error;
     }
 };
@@ -644,10 +596,19 @@ const processCompletedTrialRequest = async (phoneNumber, data) => {
  * @param {Object} userData - Datos del usuario
  * @param {Object} conversationContext - Contexto de conversación
  * @param {Object} memory - Memoria conversacional
+ * @param {Object} flowResult - Resultado del procesamiento de flujos
  * @returns {string} - Respuesta generada
  */
-const generateContextualResponse = async (message, intents, entities, userData, conversationContext, memory) => {
+const generateContextualResponse = async (message, intents, entities, userData, conversationContext, memory, flowResult = null) => {
     try {
+        logger.debug(`Generando respuesta contextual. FlowResult: ${JSON.stringify(flowResult)}`);
+        
+        // Si se completó un flujo de solicitud de prueba, generar respuesta con credenciales
+        if (flowResult && flowResult.completed && flowResult.credentials) {
+            logger.info(`Generando respuesta con credenciales para prueba completada`);
+            return generateTrialCompletionResponse(flowResult.credentials);
+        }
+        
         // Enriquecer el contexto con información de memoria
         const enrichedContext = {
             ...conversationContext,
@@ -659,7 +620,8 @@ const generateContextualResponse = async (message, intents, entities, userData, 
                 knownEntitiesCount: Object.keys(memory.knownEntities).length,
                 conversationLength: memory.messageHistory.length,
                 topicStability: memory.conversationContext.contextStrength
-            }
+            },
+            flowResult: flowResult // Agregar información del flujo al contexto
         };
         
         // Usar el servicio de respuesta mejorado
@@ -672,28 +634,63 @@ const generateContextualResponse = async (message, intents, entities, userData, 
 };
 
 /**
- * Genera una respuesta de error contextual
- * @param {string} phoneNumber - Número de teléfono
- * @param {Error} error - Error ocurrido
- * @returns {string} - Mensaje de error apropiado
+ * Genera respuesta de finalización de solicitud de prueba con credenciales
+ * @param {Object} credentials - Credenciales creadas
+ * @returns {string} - Respuesta con credenciales
  */
-const generateErrorResponse = async (phoneNumber, error) => {
-    try {
-        const memory = await getConversationMemory(phoneNumber);
-        const userName = memory.userProfile.isRegistered ? memory.userProfile.name : '';
-        
-        if (userName) {
-            return `Disculpa ${userName}, estoy experimentando problemas técnicos en este momento. Por favor, intenta nuevamente en unos minutos.`;
-        } else {
-            return "Lo siento, estoy teniendo problemas técnicos. Por favor, intenta de nuevo más tarde o contacta a nuestro equipo de soporte.";
-        }
-    } catch (memoryError) {
-        return "Lo siento, ocurrió un error al procesar tu solicitud. Por favor, intenta nuevamente más tarde.";
-    }
+const generateTrialCompletionResponse = (credentials) => {
+    const serviceName = generalConfig.serviceMetadata.name || 'ERP Demo';
+    const serviceUrl = process.env.ERP_SERVICE_URL || 'https://erp-demo.ejemplo.com';
+    const trialDays = generalConfig.serviceMetadata.trialDuration || 7;
+    
+    const expirationDate = new Date(credentials.expirationDate);
+    const formattedDate = expirationDate.toLocaleDateString('es-ES', {
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric'
+    });
+    
+    return `🎉 ¡Felicidades ${credentials.userName}! Tu cuenta de prueba de ${serviceName} ha sido creada exitosamente.
+
+📋 **DATOS DE ACCESO:**
+👤 Usuario: *${credentials.username}*
+🔐 Contraseña: *${credentials.password}*
+
+🌐 **ACCESO AL SISTEMA:**
+${serviceUrl}/login
+
+📧 Hemos enviado esta información también a: ${credentials.userEmail}
+
+⏰ **DURACIÓN:** Tu cuenta estará activa durante ${trialDays} días (hasta el ${formattedDate}).
+
+🚀 **PRÓXIMOS PASOS:**
+1. Ingresa al sistema con tus credenciales
+2. Explora todos los módulos disponibles
+3. Si tienes dudas, contacta nuestro soporte
+
+¡Disfruta explorando ${serviceName} y descubre cómo puede transformar tu negocio! 💼✨`;
 };
 
 /**
- * Establece el estado de flujo activo
+ * Genera una respuesta de error contextual
+ * @param {string} phoneNumber - Número de teléfono
+ * @param {Error} error - Error ocurrido
+ * @returns {string} - Mensaje de error
+ */
+const generateErrorResponse = async (phoneNumber, error) => {
+    const memory = await getConversationMemory(phoneNumber);
+    const hasActiveFlow = activeFlowStates.has(phoneNumber);
+    
+    if (hasActiveFlow) {
+        return "Disculpa, tuve un problema procesando tu solicitud. Por favor, intenta nuevamente o escribe 'cancelar' para reiniciar.";
+    }
+    
+    return "Lo siento, estoy experimentando dificultades técnicas. Por favor, intenta de nuevo en unos momentos.";
+};
+
+/**
+ * Establece el estado de un flujo activo
  * @param {string} phoneNumber - Número de teléfono
  * @param {Object} flowState - Estado del flujo
  */
@@ -703,7 +700,7 @@ const setActiveFlowState = (phoneNumber, flowState) => {
 };
 
 /**
- * Obtiene el estado de flujo activo
+ * Obtiene el estado de un flujo activo
  * @param {string} phoneNumber - Número de teléfono
  * @returns {Object|null} - Estado del flujo o null
  */
@@ -712,7 +709,7 @@ const getActiveFlowState = (phoneNumber) => {
 };
 
 /**
- * Limpia el estado de flujo activo
+ * Limpia el estado de un flujo activo
  * @param {string} phoneNumber - Número de teléfono
  */
 const clearActiveFlowState = (phoneNumber) => {
@@ -721,35 +718,34 @@ const clearActiveFlowState = (phoneNumber) => {
 };
 
 /**
- * Actualiza el estado de flujo activo
+ * Actualiza el estado del flujo activo después de cada interacción
  * @param {string} phoneNumber - Número de teléfono
  * @param {Array} intents - Intenciones detectadas
  * @param {Object} entities - Entidades extraídas
  * @param {Object} conversationContext - Contexto de conversación
- * @param {string} response - Respuesta enviada
+ * @param {string} response - Respuesta generada
  */
 const updateActiveFlowState = async (phoneNumber, intents, entities, conversationContext, response) => {
     const activeFlow = activeFlowStates.get(phoneNumber);
     
     if (!activeFlow) return;
     
-    // Verificar timeout del flujo
-    const now = new Date();
-    const flowDuration = (now - new Date(activeFlow.startTime)) / (1000 * 60); // en minutos
-    
-    if (flowDuration > 30) { // 30 minutos de timeout
+    // Si la respuesta incluye "completado" o credenciales, limpiar el flujo
+    if (response.includes('exitosamente') && response.includes('Usuario:') && response.includes('Contraseña:')) {
         clearActiveFlowState(phoneNumber);
-        logger.info(`Flujo ${activeFlow.flowType} para ${phoneNumber} expiró por timeout`);
-        return;
+        logger.info(`Flujo completado y limpiado para ${phoneNumber}`);
     }
     
-    // Actualizar último acceso del flujo
-    activeFlow.lastUpdate = now;
-    activeFlowStates.set(phoneNumber, activeFlow);
+    // Limpiar flujos expirados (más de 30 minutos)
+    const expirationTime = 30 * 60 * 1000; // 30 minutos
+    if (new Date() - activeFlow.startTime > expirationTime) {
+        clearActiveFlowState(phoneNumber);
+        logger.info(`Flujo expirado y limpiado para ${phoneNumber}`);
+    }
 };
 
 /**
- * Limpia la memoria conversacional y flujos activos para un usuario
+ * Limpia el contexto de usuario (útil para testing o reset)
  * @param {string} phoneNumber - Número de teléfono
  */
 const clearUserContext = (phoneNumber) => {
@@ -759,58 +755,43 @@ const clearUserContext = (phoneNumber) => {
 };
 
 /**
- * Obtiene estadísticas del controlador de mensajes
+ * Obtiene estadísticas del controlador
  * @returns {Object} - Estadísticas
  */
 const getControllerStats = () => {
     return {
         activeFlows: activeFlowStates.size,
-        flowTypes: Array.from(activeFlowStates.values()).reduce((acc, flow) => {
-            acc[flow.flowType] = (acc[flow.flowType] || 0) + 1;
-            return acc;
-        }, {}),
-        timestamp: new Date()
+        flows: Array.from(activeFlowStates.entries()).map(([phone, flow]) => ({
+            phone: phone.substring(0, 8) + '...',
+            type: flow.flowType,
+            startTime: flow.startTime
+        }))
     };
 };
 
-// Función auxiliar para limpiar flujos expirados periódicamente
+// Limpieza periódica de flujos expirados
 const cleanupExpiredFlows = () => {
+    const expirationTime = 30 * 60 * 1000; // 30 minutos
     const now = new Date();
-    const expiredFlows = [];
     
-    for (const [phoneNumber, flowState] of activeFlowStates.entries()) {
-        const flowDuration = (now - new Date(flowState.startTime)) / (1000 * 60); // en minutos
-        
-        if (flowDuration > 30) {
-            expiredFlows.push(phoneNumber);
+    for (const [phoneNumber, flow] of activeFlowStates.entries()) {
+        if (now - flow.startTime > expirationTime) {
+            clearActiveFlowState(phoneNumber);
+            logger.info(`Flujo expirado limpiado automáticamente para ${phoneNumber}`);
         }
-    }
-    
-    for (const phoneNumber of expiredFlows) {
-        clearActiveFlowState(phoneNumber);
-        logger.info(`Flujo expirado limpiado para ${phoneNumber}`);
-    }
-    
-    if (expiredFlows.length > 0) {
-        logger.info(`Limpieza automática: ${expiredFlows.length} flujos expirados eliminados`);
     }
 };
 
 // Ejecutar limpieza cada 15 minutos
 setInterval(cleanupExpiredFlows, 15 * 60 * 1000);
 
-// Exportar funciones principales
 module.exports = {
     handleMessage,
-    generateOffTopicResponseForUser,
-    updateUserWithEntities,
-    buildEnhancedConversationContext,
-    processIntentsWithContext,
-    generateContextualResponse,
-    setActiveFlowState,
-    getActiveFlowState,
-    clearActiveFlowState,
     clearUserContext,
     getControllerStats,
-    cleanupExpiredFlows
+    // Exportar funciones útiles para testing
+    processIntentsWithContext,
+    startTrialRequestFlowWithContext,
+    processCompletedTrialRequest,
+    generateTrialCompletionResponse
 };
