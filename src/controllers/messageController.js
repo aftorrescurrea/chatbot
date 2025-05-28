@@ -9,14 +9,20 @@ const { generateResponse } = require('../services/responseService');
 const { createOrUpdateUser, findUserByPhone } = require('../services/userService');
 const { createCredentials } = require('../services/credentialService');
 const { saveMessage } = require('../services/conversationService');
-const { 
-    getConversationMemory, 
-    updateConversationMemory, 
+const {
+    getConversationMemory,
+    updateConversationMemory,
     determineTopicFromIntents,
-    clearConversationMemory 
+    clearConversationMemory
 } = require('../services/MemoryService');
 const { logger } = require('../utils/logger');
 const { generalConfig } = require('../config/promptConfig');
+const {
+    startOrUpdateSession,
+    closeSession,
+    isSessionActive,
+    getSessionInfo
+} = require('../services/sessionService');
 
 // Almacenamiento en memoria para el estado de las conversaciones activas
 const activeFlowStates = new Map();
@@ -32,6 +38,9 @@ const handleMessage = async (client, message) => {
         const body = message.body;
         
         logger.info(`Mensaje recibido de ${from}: ${body}`);
+        
+        // Actualizar o iniciar sesión
+        startOrUpdateSession(from, client);
         
         // Obtener memoria conversacional existente
         const conversationMemory = await getConversationMemory(from);
@@ -132,6 +141,12 @@ const handleMessage = async (client, message) => {
         
         // Actualizar estado de flujos activos
         await updateActiveFlowState(from, intents, entities, conversationContext, response);
+        
+        // Verificar si la conversación debe cerrarse
+        const shouldCloseSession = await checkIfShouldCloseSession(from, intents, response, flowResult);
+        if (shouldCloseSession.close) {
+            await closeSession(from, client, shouldCloseSession.reason);
+        }
         
     } catch (error) {
         logger.error(`Error al procesar mensaje: ${error.message}`);
@@ -782,6 +797,74 @@ const cleanupExpiredFlows = () => {
     }
 };
 
+/**
+ * Verifica si la sesión debe cerrarse basándose en intenciones y contexto
+ * @param {string} phoneNumber - Número de teléfono
+ * @param {Array} intents - Intenciones detectadas
+ * @param {string} response - Respuesta generada
+ * @param {Object} flowResult - Resultado del flujo
+ * @returns {Object} - { close: boolean, reason: string }
+ */
+const checkIfShouldCloseSession = async (phoneNumber, intents, response, flowResult) => {
+    try {
+        // Caso 1: Se completó un flujo de solicitud de prueba con credenciales
+        if (flowResult && flowResult.completed && flowResult.credentials) {
+            logger.info(`Sesión será cerrada - Credenciales entregadas para ${phoneNumber}`);
+            return {
+                close: true,
+                reason: 'Credenciales de prueba entregadas exitosamente'
+            };
+        }
+        
+        // Caso 2: El usuario se despide
+        if (intents.includes('despedida')) {
+            logger.info(`Sesión será cerrada - Despedida detectada para ${phoneNumber}`);
+            return {
+                close: true,
+                reason: 'Conversación finalizada por despedida del usuario'
+            };
+        }
+        
+        // Caso 3: Se detecta intención de cancelación
+        if (intents.includes('cancelacion')) {
+            logger.info(`Sesión será cerrada - Cancelación detectada para ${phoneNumber}`);
+            return {
+                close: true,
+                reason: 'Proceso cancelado por el usuario'
+            };
+        }
+        
+        // Caso 4: La respuesta contiene indicadores de finalización
+        const finalizationKeywords = [
+            'gracias por usar nuestro servicio',
+            'hasta pronto',
+            'que tengas un excelente día',
+            'conversación finalizada',
+            'sesión cerrada'
+        ];
+        
+        const responseLower = response.toLowerCase();
+        const containsFinalization = finalizationKeywords.some(keyword =>
+            responseLower.includes(keyword)
+        );
+        
+        if (containsFinalization) {
+            logger.info(`Sesión será cerrada - Palabras de finalización detectadas para ${phoneNumber}`);
+            return {
+                close: true,
+                reason: 'Conversación completada satisfactoriamente'
+            };
+        }
+        
+        // No cerrar la sesión
+        return { close: false, reason: null };
+        
+    } catch (error) {
+        logger.error(`Error al verificar cierre de sesión: ${error.message}`);
+        return { close: false, reason: null };
+    }
+};
+
 // Ejecutar limpieza cada 15 minutos
 setInterval(cleanupExpiredFlows, 15 * 60 * 1000);
 
@@ -789,6 +872,7 @@ module.exports = {
     handleMessage,
     clearUserContext,
     getControllerStats,
+    clearActiveFlowState,
     // Exportar funciones útiles para testing
     processIntentsWithContext,
     startTrialRequestFlowWithContext,

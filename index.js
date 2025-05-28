@@ -213,6 +213,10 @@ function setupPeriodicCleanup() {
             const { cleanupExpiredMemories } = require('./src/services/MemoryService');
             cleanupExpiredMemories();
             
+            // Limpiar sesiones expiradas
+            const { cleanupExpiredSessions } = require('./src/services/sessionService');
+            cleanupExpiredSessions();
+            
             logger.info('✅ Limpieza periódica completada');
         } catch (error) {
             logger.error(`❌ Error en limpieza periódica: ${error.message}`);
@@ -252,10 +256,15 @@ function logSystemStats() {
         const memoryStats = getMemoryStats();
         const processMemory = process.memoryUsage();
         
+        // Obtener estadísticas de sesiones
+        const { getAllActiveSessions, SESSION_TIMEOUT_MINUTES } = require('./src/services/sessionService');
+        const activeSessions = getAllActiveSessions();
+        
         logger.info('📊 === ESTADÍSTICAS DEL SISTEMA ===');
         logger.info(`💬 Flujos activos: ${controllerStats.activeFlows}`);
         logger.info(`🧠 Usuarios en memoria: ${memoryStats.totalUsers}`);
-        logger.info(`🔄 Memoria de proceso: ${Math.round(processMemory.rss / 1024 / 1024)}MB`);
+        logger.info(`👥 Sesiones activas: ${activeSessions.length} (timeout: ${SESSION_TIMEOUT_MINUTES} min)`);
+        logger.info(` Memoria de proceso: ${Math.round(processMemory.rss / 1024 / 1024)}MB`);
         logger.info(`📱 Estado WhatsApp: ${whatsappClient ? (whatsappClient.info ? 'Conectado' : 'Inicializando') : 'Desconectado'}`);
         logger.info(`🗄️ Estado MongoDB: ${mongoose.connection.readyState === 1 ? 'Conectado' : 'Desconectado'}`);
         
@@ -263,6 +272,14 @@ function logSystemStats() {
             logger.info('📈 Tipos de flujo activos:');
             Object.entries(controllerStats.flowTypes).forEach(([type, count]) => {
                 logger.info(`   - ${type}: ${count}`);
+            });
+        }
+        
+        if (activeSessions.length > 0) {
+            logger.info('👥 Sesiones activas:');
+            activeSessions.forEach(session => {
+                const phoneShort = session.phoneNumber.substring(0, 8) + '...';
+                logger.info(`   - ${phoneShort}: activa por ${Math.floor(session.timeActive / 60)}min, timeout en ${Math.floor(session.timeRemaining / 60)}min`);
             });
         }
         
@@ -345,6 +362,11 @@ async function gracefulShutdown(signal) {
     logger.info(`📴 Señal ${signal} recibida. Iniciando cierre graceful...`);
     
     try {
+        // Detener todos los timers de sesión
+        const { stopAllTimers } = require('./src/services/sessionService');
+        logger.info('⏱️ Deteniendo timers de sesión...');
+        stopAllTimers();
+        
         // Cerrar cliente de WhatsApp
         if (whatsappClient) {
             logger.info('📱 Cerrando cliente de WhatsApp...');
