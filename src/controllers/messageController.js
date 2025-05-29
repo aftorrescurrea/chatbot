@@ -873,6 +873,7 @@ module.exports = {
     clearUserContext,
     getControllerStats,
     clearActiveFlowState,
+    cleanupExpiredFlows,
     // Exportar funciones útiles para testing
     processIntentsWithContext,
     startTrialRequestFlowWithContext,
