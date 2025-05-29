@@ -209,6 +209,97 @@ const importEntitiesFromConfig = async (entityConfig) => {
       'industria': 'text'
     };
     
+    // Función auxiliar para extraer valores según el tipo de entidad
+    const extractValueFromExample = (text, entityName) => {
+      let value = text;
+      
+      try {
+        switch (entityName) {
+          case 'nombre':
+            const nameMatch = text.match(/(?:llamo|soy|nombre es|llamarme|Nombre:)\s*(.+)/i);
+            if (nameMatch) value = nameMatch[1].trim();
+            break;
+            
+          case 'email':
+            const emailMatch = text.match(/[\w.-]+@[\w.-]+\.\w+/);
+            if (emailMatch) value = emailMatch[0];
+            break;
+            
+          case 'telefono':
+            // Múltiples patrones para diferentes formatos de teléfono
+            const phonePatterns = [
+              /(?:número es|Tel:|Teléfono:|celular:|whatsapp:|Contacto:)?\s*(\+?\d[\d\s\-()]+\d)/i,
+              /(\d{3}[-.\s]?\d{3}[-.\s]?\d{4})/,
+              /(\(\d{2,3}\)\s?\d{4}[-.\s]?\d{4})/,
+              /(\+\d{1,3}\s?\d{2,3}\s?\d{3}\s?\d{4})/,
+              /(\d{10,15})/
+            ];
+            
+            for (const pattern of phonePatterns) {
+              const match = text.match(pattern);
+              if (match) {
+                value = match[1].trim();
+                break;
+              }
+            }
+            
+            // Si no se encontró con patrones, buscar cualquier secuencia de números
+            if (value === text) {
+              const numbers = text.match(/[\d\s\-+()]+/g);
+              if (numbers) {
+                // Tomar la secuencia más larga de números
+                const longestNumber = numbers.reduce((a, b) => 
+                  b.replace(/\D/g, '').length > a.replace(/\D/g, '').length ? b : a
+                );
+                if (longestNumber.replace(/\D/g, '').length >= 7) {
+                  value = longestNumber.trim();
+                }
+              }
+            }
+            break;
+            
+          case 'empresa':
+            const companyMatch = text.match(/(?:Trabajo en|empresa es|Vengo de parte de|Empresa:|compañía:|Representando a|Somos de)\s*(.+)/i);
+            if (companyMatch) value = companyMatch[1].trim();
+            break;
+            
+          case 'cargo':
+            const positionMatch = text.match(/(?:Soy|puesto es|Trabajo como|Cargo:|desempeño como|Puesto:)\s*(.+)/i);
+            if (positionMatch) value = positionMatch[1].trim();
+            break;
+            
+          case 'usuario':
+            const userMatch = text.match(/(?:usuario será|Nombre de usuario:|Quiero el usuario|Usuario:|como nombre de usuario|Prefiero usar|id de acceso:)\s*(.+)/i);
+            if (userMatch) value = userMatch[1].trim();
+            break;
+            
+          case 'clave':
+            const passwordMatch = text.match(/(?:contraseña es|Clave:|Usaré|Contraseña:|pass:|Clave de acceso:)\s*(.+)/i);
+            if (passwordMatch) value = passwordMatch[1].trim();
+            break;
+            
+          case 'fecha':
+            const dateMatch = text.match(/(?:Desde el|Para el|Ocurrió el|Fecha:|Programado para|próximo)\s*(.+)/i);
+            if (dateMatch) value = dateMatch[1].trim();
+            break;
+            
+          case 'numero_empleados':
+            const employeeMatch = text.match(/(\d+)\s*(?:empleados|trabajadores|personas|colaboradores|profesionales)/i);
+            if (employeeMatch) value = employeeMatch[1];
+            break;
+            
+          case 'industria':
+            const industryMatch = text.match(/(?:Sector|Trabajamos en|Industria:|dedicamos a la)\s*(.+)/i);
+            if (industryMatch) value = industryMatch[1].trim();
+            break;
+        }
+      } catch (error) {
+        logger.warn(`Error extrayendo valor para ${entityName}: ${error.message}`);
+      }
+      
+      return value;
+    };
+    
     for (const entityName of entityConfig.supportedEntities) {
       const existingEntity = await Entity.findByName(entityName);
       
@@ -217,33 +308,45 @@ const importEntitiesFromConfig = async (entityConfig) => {
         const displayName = entityName.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
         
         // Convertir ejemplos simples a formato con texto y valor
-        const formattedExamples = examples.map(text => {
-          // Extraer el valor del ejemplo
-          let value = text;
+        const formattedExamples = [];
+        
+        for (const exampleText of examples) {
+          const value = extractValueFromExample(exampleText, entityName);
           
-          // Para algunos tipos, intentar extraer el valor real
-          if (entityName === 'nombre') {
-            const match = text.match(/(?:llamo|soy|nombre es|llamarme)\s+(.+)/i);
-            if (match) value = match[1].trim();
-          } else if (entityName === 'email') {
-            const match = text.match(/[\w.-]+@[\w.-]+\.\w+/);
-            if (match) value = match[0];
-          } else if (entityName === 'telefono') {
-            const match = text.match(/[\d\s\-+()]+/);
-            if (match) value = match[0].trim();
+          // Solo agregar ejemplos con valores válidos
+          if (value && value.trim() !== '' && value !== exampleText.trim()) {
+            formattedExamples.push({
+              text: exampleText,
+              value: value
+            });
+          } else {
+            // Si no se pudo extraer un valor diferente, usar el texto completo pero registrar advertencia
+            logger.warn(`Usando texto completo como valor para ${entityName}: "${exampleText}"`);
+            formattedExamples.push({
+              text: exampleText,
+              value: exampleText
+            });
           }
-          
-          return { text, value };
-        });
+        }
         
-        const entity = await createEntity({
-          name: entityName,
-          displayName: displayName,
-          type: typeMapping[entityName] || 'text',
-          examples: formattedExamples
-        });
-        
-        imported.push(entity);
+        // Solo crear la entidad si hay ejemplos válidos
+        if (formattedExamples.length > 0) {
+          try {
+            const entity = await createEntity({
+              name: entityName,
+              displayName: displayName,
+              type: typeMapping[entityName] || 'text',
+              examples: formattedExamples
+            });
+            
+            imported.push(entity);
+            logger.info(`Entidad ${entityName} creada con ${formattedExamples.length} ejemplos`);
+          } catch (createError) {
+            logger.error(`Error creando entidad ${entityName}: ${createError.message}`);
+          }
+        } else {
+          logger.warn(`No se creó la entidad ${entityName} porque no hay ejemplos válidos`);
+        }
       }
     }
     
@@ -252,10 +355,11 @@ const importEntitiesFromConfig = async (entityConfig) => {
       for (const complex of entityConfig.complexExamples) {
         // Los ejemplos complejos se pueden usar para mejorar el entrenamiento
         // pero no se almacenan directamente en las entidades individuales
+        logger.debug(`Ejemplo complejo procesado: ${complex.text}`);
       }
     }
     
-    logger.info(`${imported.length} entidades importadas`);
+    logger.info(`${imported.length} entidades importadas exitosamente`);
     return imported;
   } catch (error) {
     logger.error(`Error al importar entidades: ${error.message}`);
