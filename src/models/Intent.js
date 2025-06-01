@@ -31,7 +31,7 @@ const intentSchema = new mongoose.Schema({
   // Nuevos campos para el sistema mejorado
   category: {
     type: String,
-    enum: ['general', 'tutorial', 'support', 'sales', 'complaint', 'greeting'],
+    enum: ['general', 'tutorial', 'support', 'sales', 'complaint', 'greeting', 'credit', 'financial', 'payment'],
     default: 'general'
   },
   hasSpecificFlow: {
@@ -59,6 +59,27 @@ const intentSchema = new mongoose.Schema({
     requiresInput: Boolean,
     validationRules: mongoose.Schema.Types.Mixed
   }],
+  // Nuevos campos para detección basada en reglas
+  detectionPatterns: {
+    type: [String],
+    default: []
+  },
+  relatedIntents: [{
+    intent: {
+      type: String,
+      ref: 'Intent'
+    },
+    condition: {
+      type: String,
+      enum: ['always', 'contains'],
+      default: 'always'
+    },
+    keywords: [String]
+  }],
+  keywordDetectionEnabled: {
+    type: Boolean,
+    default: false
+  },
   metadata: {
     type: Map,
     of: mongoose.Schema.Types.Mixed,

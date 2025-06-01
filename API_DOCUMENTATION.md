@@ -48,7 +48,19 @@ GET /api/intents/nlp
     "intentExamples": {
       "saludo": ["Hola", "Buenos días", ...]
     },
-    "conversationExamples": [...]
+    "conversationExamples": [...],
+    "detectionPatterns": {
+      "guia_reportes": ["reporte", "reportes", "informe", ...]
+    },
+    "intentRelationships": {
+      "guia_reportes": [
+        {
+          "intent": "tutorial_general",
+          "condition": "contains",
+          "keywords": ["ayuda", "tutorial", "explicar"]
+        }
+      ]
+    }
   }
 }
 ```
@@ -91,12 +103,104 @@ PATCH /api/intents/:id/examples
 }
 ```
 
-### 7. Eliminar una intención (soft delete)
+### 7. Actualizar patrones de detección
+```
+PATCH /api/intents/:id/patterns
+```
+
+**Body:**
+```json
+{
+  "patterns": ["reporte", "reportes", "informe", "crear reporte", "generar informe"]
+}
+```
+
+**Respuesta exitosa (200):**
+```json
+{
+  "success": true,
+  "data": {
+    "_id": "...",
+    "name": "guia_reportes",
+    "displayName": "Guía de Reportes",
+    "detectionPatterns": ["reporte", "reportes", "informe", "crear reporte", "generar informe"],
+    "keywordDetectionEnabled": true,
+    "...": "..."
+  },
+  "message": "5 patrones de detección actualizados"
+}
+```
+
+### 8. Activar/desactivar detección por palabras clave
+```
+PATCH /api/intents/:id/keyword-detection
+```
+
+**Body:**
+```json
+{
+  "enabled": true
+}
+```
+
+**Respuesta exitosa (200):**
+```json
+{
+  "success": true,
+  "data": {
+    "_id": "...",
+    "name": "guia_reportes",
+    "keywordDetectionEnabled": true,
+    "...": "..."
+  },
+  "message": "Detección por palabras clave habilitada"
+}
+```
+
+### 9. Actualizar relaciones entre intenciones
+```
+PATCH /api/intents/:id/relations
+```
+
+**Body:**
+```json
+{
+  "relations": [
+    {
+      "intent": "tutorial_general",
+      "condition": "contains",
+      "keywords": ["ayuda", "tutorial", "explicar"]
+    }
+  ]
+}
+```
+
+**Respuesta exitosa (200):**
+```json
+{
+  "success": true,
+  "data": {
+    "_id": "...",
+    "name": "guia_reportes",
+    "relatedIntents": [
+      {
+        "intent": "tutorial_general",
+        "condition": "contains",
+        "keywords": ["ayuda", "tutorial", "explicar"]
+      }
+    ],
+    "...": "..."
+  },
+  "message": "1 relaciones actualizadas"
+}
+```
+
+### 10. Eliminar una intención (soft delete)
 ```
 DELETE /api/intents/:id
 ```
 
-### 8. Importar intenciones desde configuración
+### 11. Importar intenciones desde configuración
 ```
 POST /api/intents/import
 ```
@@ -256,3 +360,54 @@ curl -X PUT http://localhost:3000/api/entities/ID_ENTIDAD \
     "description": "Nueva descripción",
     "isActive": true
   }'
+```
+
+### Actualizar patrones de detección para una intención:
+```bash
+curl -X PATCH http://localhost:3000/api/intents/ID_INTENCION/patterns \
+  -H "Content-Type: application/json" \
+  -d '{
+    "patterns": ["reporte", "reportes", "informe", "crear reporte"]
+  }'
+```
+
+### Activar detección por palabras clave:
+```bash
+curl -X PATCH http://localhost:3000/api/intents/ID_INTENCION/keyword-detection \
+  -H "Content-Type: application/json" \
+  -d '{
+    "enabled": true
+  }'
+```
+
+## Detección basada en patrones
+
+El sistema ahora soporta un enfoque híbrido para la detección de intenciones que combina:
+1. Detección basada en LLM (Large Language Model)
+2. Detección basada en patrones y palabras clave
+
+### Componentes principales
+
+#### Patrones de detección
+Los patrones son fragmentos de texto que, si se encuentran en un mensaje del usuario, activan automáticamente una intención específica. Esta funcionalidad es especialmente útil para:
+- Intenciones con términos técnicos o específicos (ej: "reportes", "facturas")
+- Casos donde el LLM puede tener dificultades para detectar correctamente
+
+#### Relaciones entre intenciones
+Define cómo se relacionan las intenciones entre sí. Por ejemplo:
+- Si se detecta "guia_reportes" y el mensaje contiene "ayuda", también se activa "tutorial_general"
+- Soporta diferentes tipos de condiciones:
+  - `always`: La intención relacionada siempre se activará cuando se detecte la intención principal
+  - `contains`: La intención relacionada se activará solo si el mensaje contiene ciertas palabras clave
+
+### Flujo de detección
+1. Se envía el mensaje al LLM para detección principal
+2. Se aplica post-procesamiento basado en patrones y palabras clave
+3. Se aplican reglas de relación entre intenciones
+4. Se devuelve el conjunto final de intenciones detectadas
+
+### Beneficios
+- Mayor precisión en la detección de intenciones específicas
+- Menor dependencia de la calidad del modelo LLM
+- Personalizable a través de la API
+- Permite ajustes específicos sin necesidad de reentrenar modelos

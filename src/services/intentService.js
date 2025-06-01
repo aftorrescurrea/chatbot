@@ -155,9 +155,22 @@ const getIntentsForNLP = async () => {
     const supportedIntents = intents.map(intent => intent.name);
     const intentExamples = {};
     const conversationExamples = [];
+    const detectionPatterns = {};
+    const intentRelationships = {};
     
     intents.forEach(intent => {
+      // Ejemplos para la intención
       intentExamples[intent.name] = intent.examples;
+      
+      // Patrones de detección si están definidos
+      if (intent.detectionPatterns && intent.detectionPatterns.length > 0) {
+        detectionPatterns[intent.name] = intent.detectionPatterns;
+      }
+      
+      // Relaciones entre intenciones
+      if (intent.relatedIntents && intent.relatedIntents.length > 0) {
+        intentRelationships[intent.name] = intent.relatedIntents;
+      }
       
       // Generar ejemplos de conversación basados en los ejemplos
       if (intent.examples.length > 0) {
@@ -171,7 +184,9 @@ const getIntentsForNLP = async () => {
     return {
       supportedIntents,
       intentExamples,
-      conversationExamples
+      conversationExamples,
+      detectionPatterns,
+      intentRelationships
     };
   } catch (error) {
     logger.error(`Error al obtener intenciones para NLP: ${error.message}`);
@@ -214,6 +229,108 @@ const importIntentsFromConfig = async (intentConfig) => {
   }
 };
 
+/**
+ * Actualizar patrones de detección para una intención
+ * @param {string} id - ID de la intención
+ * @param {Array} patterns - Nuevos patrones de detección
+ * @returns {Object} - Intención actualizada
+ */
+const updateDetectionPatterns = async (id, patterns) => {
+  try {
+    if (!Array.isArray(patterns)) {
+      throw new Error('Los patrones deben ser un array de strings');
+    }
+
+    const intent = await Intent.findByIdAndUpdate(
+      id,
+      {
+        detectionPatterns: patterns,
+        keywordDetectionEnabled: patterns.length > 0 // Habilitar automáticamente si hay patrones
+      },
+      { new: true, runValidators: true }
+    );
+    
+    if (!intent) {
+      throw new Error('Intención no encontrada');
+    }
+    
+    logger.info(`Patrones de detección actualizados para: ${intent.name}`);
+    return intent;
+  } catch (error) {
+    logger.error(`Error al actualizar patrones: ${error.message}`);
+    throw error;
+  }
+};
+
+/**
+ * Actualizar estado de detección por palabras clave
+ * @param {string} id - ID de la intención
+ * @param {boolean} enabled - Estado a establecer
+ * @returns {Object} - Intención actualizada
+ */
+const updateKeywordDetection = async (id, enabled) => {
+  try {
+    const intent = await Intent.findByIdAndUpdate(
+      id,
+      { keywordDetectionEnabled: enabled },
+      { new: true }
+    );
+    
+    if (!intent) {
+      throw new Error('Intención no encontrada');
+    }
+    
+    logger.info(`Detección por palabras clave ${enabled ? 'habilitada' : 'deshabilitada'} para: ${intent.name}`);
+    return intent;
+  } catch (error) {
+    logger.error(`Error al actualizar estado de detección: ${error.message}`);
+    throw error;
+  }
+};
+
+/**
+ * Actualizar relaciones entre intenciones
+ * @param {string} id - ID de la intención
+ * @param {Array} relations - Relaciones a establecer
+ * @returns {Object} - Intención actualizada
+ */
+const updateIntentRelations = async (id, relations) => {
+  try {
+    if (!Array.isArray(relations)) {
+      throw new Error('Las relaciones deben ser un array');
+    }
+
+    // Validar estructura de relaciones
+    for (const relation of relations) {
+      if (!relation.intent) {
+        throw new Error('Cada relación debe tener un campo "intent"');
+      }
+      if (!relation.condition) {
+        throw new Error('Cada relación debe tener un campo "condition"');
+      }
+      if (relation.condition === 'contains' && (!relation.keywords || !Array.isArray(relation.keywords))) {
+        throw new Error('Las relaciones con condición "contains" deben tener un array de palabras clave');
+      }
+    }
+
+    const intent = await Intent.findByIdAndUpdate(
+      id,
+      { relatedIntents: relations },
+      { new: true, runValidators: true }
+    );
+    
+    if (!intent) {
+      throw new Error('Intención no encontrada');
+    }
+    
+    logger.info(`Relaciones actualizadas para: ${intent.name}`);
+    return intent;
+  } catch (error) {
+    logger.error(`Error al actualizar relaciones: ${error.message}`);
+    throw error;
+  }
+};
+
 module.exports = {
   getAllIntents,
   getIntentById,
@@ -223,5 +340,8 @@ module.exports = {
   deleteIntent,
   addExamples,
   getIntentsForNLP,
-  importIntentsFromConfig
+  importIntentsFromConfig,
+  updateDetectionPatterns,
+  updateKeywordDetection,
+  updateIntentRelations
 };

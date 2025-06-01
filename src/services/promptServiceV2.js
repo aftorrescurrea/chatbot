@@ -313,7 +313,7 @@ async function detectIntentions(message, templateName = 'intent-detection', vari
 
         const response = await queryModel(messages, options);
         
-        return parseIntentResponse(response);
+        return parseIntentResponse(response, message);
     } catch (error) {
         logger.error(`Error al detectar intenciones: ${error.message}`);
         return { intents: [] };
@@ -372,12 +372,28 @@ INTENCIONES POSIBLES:
 - {{this}}
 {{/each}}
 
+### DEFINICIONES CLAVE (CRUCIAL) ###
+- guia_reportes: cualquier pregunta sobre crear, generar o consultar reportes/informes
+- guia_inventario: preguntas sobre gestión de inventario/stock/productos
+- guia_facturacion: preguntas sobre crear facturas o facturación
+- guia_usuarios: preguntas sobre gestión de usuarios/permisos
+- tutorial_general: solicitudes de ayuda general o tutoriales
+- consulta_caracteristicas: preguntas sobre qué incluye o hace el sistema
+
+### EJEMPLOS ESPECÍFICOS DE DETECCIÓN ###
+- "como creo un reporte?" → ["guia_reportes"]
+- "necesito generar reportes" → ["guia_reportes"]
+- "quiero crear un reporte de ventas" → ["guia_reportes"]
+- "hola, como creo un reporte?" → ["saludo", "guia_reportes"]
+- "necesito ayuda para crear reportes" → ["guia_reportes", "tutorial_general"]
+
 ### IMPORTANTE ###
 - Considera SIEMPRE el contexto conversacional
 - Si el usuario dice "sí", "correcto", "exacto" → probablemente es confirmación
 - Si continúa el tema actual, incluye intenciones relacionadas
 - Si cambia de tema abruptamente, detecta la nueva intención principal
 - Un mensaje puede tener MÚLTIPLES intenciones simultáneamente
+- Es EXTREMADAMENTE IMPORTANTE detectar correctamente cuando alguien pregunta sobre reportes
 
 Formato de respuesta requerido:
 {"intents": ["intencion1", "intencion2"]}`;
@@ -410,7 +426,7 @@ Formato de respuesta requerido:
 
         const response = await queryModel(messages, options);
         
-        const result = parseIntentResponse(response);
+        const result = parseIntentResponse(response, message);
         
         // Agregar información contextual al resultado
         return {
@@ -541,28 +557,47 @@ function getIntentsForTopic(topic) {
     return topicIntentMapping[topic] || [];
 }
 
-function parseIntentResponse(response) {
+function parseIntentResponse(response, originalMessage = '') {
     try {
         // Buscar JSON en la respuesta
         const jsonMatch = response.match(/\{[\s\S]*\}/);
+        let parsed = { intents: [] };
+        
         if (jsonMatch) {
-            const parsed = JSON.parse(jsonMatch[0]);
+            parsed = JSON.parse(jsonMatch[0]);
             
             // Validar que las intenciones sean válidas
             const validIntents = [
                 'saludo', 'despedida', 'interes_en_servicio', 'solicitud_prueba',
                 'confirmacion', 'agradecimiento', 'soporte_tecnico', 'consulta_precio',
-                'consulta_caracteristicas', 'queja', 'cancelacion'
+                'consulta_caracteristicas', 'queja', 'cancelacion',
+                // Intenciones de guías y tutoriales
+                'guia_reportes', 'guia_inventario', 'guia_facturacion', 'guia_usuarios',
+                'tutorial_general'
             ];
             
             if (parsed.intents && Array.isArray(parsed.intents)) {
                 parsed.intents = parsed.intents.filter(intent => validIntents.includes(intent));
+            } else {
+                parsed.intents = [];
             }
-            
-            return parsed;
         }
         
-        return { intents: [] };
+        // Detección explícita basada en palabras clave para el caso problemático de reportes
+        const messageLower = originalMessage.toLowerCase();
+        const reportePatterns = [
+            'reporte', 'reportes', 'informe', 'informes', 'crear reporte',
+            'generar reporte', 'hacer reporte', 'crear informe', 'generar informe'
+        ];
+        
+        // Si el mensaje contiene palabras relacionadas con reportes, añadir la intención
+        if (reportePatterns.some(pattern => messageLower.includes(pattern)) &&
+            !parsed.intents.includes('guia_reportes')) {
+            logger.info(`Añadiendo intención guia_reportes explícitamente para mensaje: "${originalMessage}"`);
+            parsed.intents.push('guia_reportes');
+        }
+        
+        return parsed;
     } catch (error) {
         logger.error(`Error parseando respuesta de intenciones: ${error.message}`);
         return { intents: [] };

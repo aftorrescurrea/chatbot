@@ -1,22 +1,31 @@
 /**
  * Configuración de migración para el sistema de prompts
- * Permite cambiar entre versiones v1 y v2 de forma centralizada
+ * Permite cambiar entre versiones v1, v2 y v3 de forma centralizada
  */
 
-// Estado de la migración - cambiar a true cuando estés listo para usar v2
-const USE_PROMPT_SERVICE_V2 = process.env.USE_PROMPT_SERVICE_V2 === 'true' || false;
+// Estado de la migración - elegir la versión a utilizar
+const PROMPT_SERVICE_VERSION = process.env.PROMPT_SERVICE_VERSION || 'v1';
 
-// Importar el servicio correcto según la configuración
-const promptService = USE_PROMPT_SERVICE_V2 
-    ? require('../services/promptServiceV2')
-    : require('../services/promptService');
+// Determinar qué servicio usar según la versión configurada
+let promptService;
+switch (PROMPT_SERVICE_VERSION) {
+    case 'v3':
+        promptService = require('../services/promptServiceV3');
+        break;
+    case 'v2':
+        promptService = require('../services/promptServiceV2');
+        break;
+    default:
+        promptService = require('../services/promptService');
+        break;
+}
 
 // Configuración adicional para la migración
 const migrationConfig = {
     // Activar logging detallado durante la migración
     enableDetailedLogging: true,
     
-    // Comparar resultados entre v1 y v2 (útil para validación)
+    // Comparar resultados entre versiones (útil para validación)
     compareVersions: process.env.COMPARE_PROMPT_VERSIONS === 'true' || false,
     
     // Límite de historial conversacional (para evitar contextos muy largos)
@@ -25,19 +34,44 @@ const migrationConfig = {
     // Tiempo máximo de respuesta en ms
     responseTimeout: 3000000,
     
-    // Configuración específica para Qwen2.5
+    // Configuración específica para el modelo
     modelConfig: {
         temperature: 0.2,
         maxTokens: 500,
         topP: 0.9,
         topK: 40
+    },
+    
+    // Características específicas de cada versión
+    features: {
+        v1: {
+            contextualAwareness: true,
+            templateRendering: true,
+            retryMechanism: true
+        },
+        v2: {
+            chatFormat: true,
+            improvedContextHandling: true,
+            enhancedPrompts: true
+        },
+        v3: {
+            dynamicProfiles: true,
+            intentBasedPrompts: true,
+            domainSpecificResponses: true
+        }
     }
 };
 
 // Función helper para obtener el servicio de prompts
 function getPromptService() {
-    if (migrationConfig.enableDetailedLogging && USE_PROMPT_SERVICE_V2) {
-        console.log('[MIGRATION] Usando promptServiceV2 con formato de chat');
+    if (migrationConfig.enableDetailedLogging) {
+        console.log(`[MIGRATION] Usando promptService${PROMPT_SERVICE_VERSION}`);
+        
+        if (PROMPT_SERVICE_VERSION === 'v3') {
+            console.log('[MIGRATION] Activado sistema de perfiles dinámicos por intención');
+        } else if (PROMPT_SERVICE_VERSION === 'v2') {
+            console.log('[MIGRATION] Usando formato de chat API');
+        }
     }
     return promptService;
 }
@@ -45,9 +79,8 @@ function getPromptService() {
 // Función para validar si el modelo soporta chat API
 async function checkChatAPISupport() {
     try {
-        const service = USE_PROMPT_SERVICE_V2 ? require('../services/promptServiceV2') : null;
-        if (service && service.CONFIG) {
-            return service.CONFIG.useChatAPI;
+        if (promptService && promptService.CONFIG) {
+            return promptService.CONFIG.useChatAPI || false;
         }
         return false;
     } catch (error) {
@@ -56,10 +89,24 @@ async function checkChatAPISupport() {
     }
 }
 
+// Función para validar si está habilitado el sistema de perfiles
+async function checkProfilesSupport() {
+    try {
+        if (PROMPT_SERVICE_VERSION === 'v3' && promptService && promptService.CONFIG) {
+            return promptService.CONFIG.usePromptProfiles || false;
+        }
+        return false;
+    } catch (error) {
+        console.error('[MIGRATION] Error verificando soporte de perfiles:', error.message);
+        return false;
+    }
+}
+
 module.exports = {
-    USE_PROMPT_SERVICE_V2,
+    PROMPT_SERVICE_VERSION,
     migrationConfig,
     getPromptService,
     checkChatAPISupport,
+    checkProfilesSupport,
     promptService // Exportar directamente el servicio configurado
 };

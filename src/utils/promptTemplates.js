@@ -13,46 +13,39 @@ const TEMPLATES_DIR = path.join(__dirname, '../templates');
 
 // Plantillas base en memoria (para no depender de archivos externos)
 const baseTemplates = {
-    // Plantilla para detección de intenciones
-    'intent-detection': `
-Eres un asistente especializado en análisis conversacional y comprensión del lenguaje natural. Tu tarea es identificar las intenciones presentes en el mensaje de un usuario que está interactuando con un chatbot de WhatsApp para un sistema {{serviceType}}.
+    // Plantilla para detección de intenciones - OPTIMIZADA
+    'intent-detection': `Eres un asistente que detecta intenciones en mensajes de WhatsApp para un sistema {{serviceType}}.
 
-### INSTRUCCIONES ###
-1. Analiza cuidadosamente el mensaje del usuario.
-2. Identifica TODAS las intenciones presentes en el mensaje, basándote en la lista proporcionada.
-3. Responde ÚNICAMENTE con un objeto JSON que contenga un array de las intenciones detectadas.
-4. No incluyas explicaciones, comentarios o texto adicional fuera del objeto JSON.
+INSTRUCCIONES:
+- Analiza el mensaje y detecta TODAS las intenciones presentes
+- Responde SOLO con JSON: {"intents": ["intencion1", "intencion2"]}
+- No agregues texto adicional
 
-### INTENCIONES SOPORTADAS ###
-{{#each supportedIntents}}
-- {{this}}
+INTENCIONES DISPONIBLES:
+{{#each supportedIntents}}- {{this}}
 {{/each}}
 
-### EJEMPLOS DE INTENCIONES ###
-{{#each intentExamples}}
-**{{@key}}**: 
-{{#each this}}
-- "{{this}}"
-{{/each}}
-{{/each}}
+DEFINICIONES DE INTENCIONES PRINCIPALES:
+- guia_reportes: preguntas sobre cómo crear, generar o hacer reportes/informes
+- guia_inventario: preguntas sobre gestión de inventario, stock o productos
+- guia_facturacion: preguntas sobre cómo facturar o crear facturas
+- guia_usuarios: preguntas sobre gestión de usuarios o permisos
+- tutorial_general: solicitudes de ayuda general o tutoriales
+- consulta_caracteristicas: preguntas sobre qué incluye o hace el sistema
+- solicitud_prueba: cuando quieren probar el sistema o solicitan demo
+- soporte_tecnico: cuando reportan problemas técnicos o errores
+- saludo: saludos como hola, buenos días, buenas tardes
+- consulta_precio: preguntas sobre precios, costos o tarifas
 
-### EJEMPLOS DE ANÁLISIS ###
-{{#each conversationExamples}}
-Usuario: "{{this.user}}"
-Respuesta correcta: {{this.assistant}}
-{{/each}}
+EJEMPLOS CLAVE:
+"como creo un reporte?" → guia_reportes
+"hola buenos días" → saludo
+"quiero probar el sistema" → solicitud_prueba
+"tengo un error" → soporte_tecnico
+"qué incluye el sistema?" → consulta_caracteristicas
+"cuánto cuesta?" → consulta_precio
 
-### IMPORTANTE ###
-- Un mensaje puede contener MÚLTIPLES intenciones simultáneamente.
-- Usa EXACTAMENTE los nombres de intenciones tal como aparecen en la lista.
-- Si un mensaje no contiene ninguna intención reconocible, devuelve un array vacío.
-- No inventes intenciones que no estén en la lista proporcionada.
-
-Formato de respuesta requerido:
-{
-  "intents": ["intencion1", "intencion2", ...]
-}
-    `,
+Recuerda: un mensaje puede tener múltiples intenciones.`,
 
     // Plantilla para extracción de entidades
     'entity-extraction': `
@@ -267,7 +260,26 @@ function renderTemplate(template, variables) {
             // Si es un objeto, iterar por sus propiedades
             return Object.entries(array).map(([key, value]) => {
                 let itemContent = content.replace(/\{\{@key\}\}/g, key);
-                itemContent = itemContent.replace(/\{\{this\}\}/g, typeof value === 'object' ? JSON.stringify(value) : value);
+                
+                // Manejar arrays anidados (como los ejemplos de intenciones)
+                if (Array.isArray(value)) {
+                    // Procesar el contenido interno para arrays
+                    const innerEachMatch = itemContent.match(/\{\{#each\s+this\}\}([\s\S]*?)\{\{\/each\}\}/);
+                    if (innerEachMatch) {
+                        const innerContent = innerEachMatch[1];
+                        const arrayContent = value.map(item => {
+                            return innerContent.replace(/\{\{this\}\}/g, item);
+                        }).join('');
+                        itemContent = itemContent.replace(innerEachMatch[0], arrayContent);
+                    } else {
+                        // Si no hay #each interno, usar el valor directamente
+                        itemContent = itemContent.replace(/\{\{this\}\}/g, value.join(', '));
+                    }
+                } else {
+                    // Para valores no-array
+                    itemContent = itemContent.replace(/\{\{this\}\}/g, typeof value === 'object' ? JSON.stringify(value) : value);
+                }
+                
                 return itemContent;
             }).join('');
         });

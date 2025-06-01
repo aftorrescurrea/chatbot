@@ -12,4 +12,9 @@ router.put('/:id', intentController.updateIntent);
 router.patch('/:id/examples', intentController.addExamples);
 router.delete('/:id', intentController.deleteIntent);
 
+// Nuevas rutas para gestión de patrones y relaciones
+router.patch('/:id/patterns', intentController.updateDetectionPatterns);
+router.patch('/:id/keyword-detection', intentController.updateKeywordDetection);
+router.patch('/:id/relations', intentController.updateIntentRelations);
+
 module.exports = router;

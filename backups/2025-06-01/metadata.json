@@ -1,0 +1,12 @@
+{
+  "timestamp": "2025-06-01T18:43:35.844Z",
+  "database": "erp-chatbot",
+  "server": "ac-tzixhmx-shard-00-01.xpbycn9.mongodb.net",
+  "collections": [
+    "conversations",
+    "entities",
+    "intents",
+    "users",
+    "credentials"
+  ]
+}

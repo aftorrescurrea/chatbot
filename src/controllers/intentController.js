@@ -218,6 +218,102 @@ const getIntentsForNLP = async (req, res) => {
   }
 };
 
+/**
+ * Actualizar patrones de detección para una intención
+ */
+const updateDetectionPatterns = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { patterns } = req.body;
+    
+    if (!patterns || !Array.isArray(patterns)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Se requiere un array de patrones'
+      });
+    }
+    
+    const intent = await intentService.updateDetectionPatterns(id, patterns);
+    
+    res.json({
+      success: true,
+      data: intent,
+      message: `${patterns.length} patrones de detección actualizados`
+    });
+  } catch (error) {
+    logger.error(`Error en updateDetectionPatterns controller: ${error.message}`);
+    const status = error.message === 'Intención no encontrada' ? 404 : 500;
+    res.status(status).json({
+      success: false,
+      error: error.message
+    });
+  }
+};
+
+/**
+ * Actualizar estado de detección por palabras clave
+ */
+const updateKeywordDetection = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { enabled } = req.body;
+    
+    if (enabled === undefined) {
+      return res.status(400).json({
+        success: false,
+        error: 'Se requiere el campo "enabled" (boolean)'
+      });
+    }
+    
+    const intent = await intentService.updateKeywordDetection(id, enabled);
+    
+    res.json({
+      success: true,
+      data: intent,
+      message: `Detección por palabras clave ${enabled ? 'habilitada' : 'deshabilitada'}`
+    });
+  } catch (error) {
+    logger.error(`Error en updateKeywordDetection controller: ${error.message}`);
+    const status = error.message === 'Intención no encontrada' ? 404 : 500;
+    res.status(status).json({
+      success: false,
+      error: error.message
+    });
+  }
+};
+
+/**
+ * Actualizar relaciones entre intenciones
+ */
+const updateIntentRelations = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { relations } = req.body;
+    
+    if (!relations || !Array.isArray(relations)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Se requiere un array de relaciones'
+      });
+    }
+    
+    const intent = await intentService.updateIntentRelations(id, relations);
+    
+    res.json({
+      success: true,
+      data: intent,
+      message: `${relations.length} relaciones actualizadas`
+    });
+  } catch (error) {
+    logger.error(`Error en updateIntentRelations controller: ${error.message}`);
+    const status = error.message === 'Intención no encontrada' ? 404 : 500;
+    res.status(status).json({
+      success: false,
+      error: error.message
+    });
+  }
+};
+
 module.exports = {
   getAllIntents,
   getIntentById,
@@ -226,5 +322,8 @@ module.exports = {
   deleteIntent,
   addExamples,
   importIntents,
-  getIntentsForNLP
+  getIntentsForNLP,
+  updateDetectionPatterns,
+  updateKeywordDetection,
+  updateIntentRelations
 };
