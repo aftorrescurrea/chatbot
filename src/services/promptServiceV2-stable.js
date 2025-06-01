@@ -1,6 +1,6 @@
 /**
- * Servicio de prompts mejorado para el chatbot de WhatsApp ERP
- * Incluye capacidades contextuales para mejor comprensión conversacional
+ * Servicio de prompts mejorado v2 - Versión estable
+ * Usa la estructura mejorada pero con la API generate por defecto para mayor estabilidad
  */
 
 const fetch = require('node-fetch');
@@ -11,10 +11,12 @@ const { renderTemplate } = require('../utils/promptTemplates');
 const CONFIG = {
     maxRetries: 3,
     retryDelay: 2000, // 2 segundos
-    timeout: 600000, // 30 segundos
+    timeout: 600000, // 5 minutos
     temperature: 0.2,
     topP: 0.9,
-    topK: 40
+    topK: 40,
+    // Por defecto usar generate para estabilidad, cambiar a true para probar chat
+    useChatAPI: true
 };
 
 /**
@@ -39,38 +41,57 @@ function isModelLoadingError(errorMessage) {
 }
 
 /**
- * Consulta al modelo LLM usando la API de generate de Ollama
+ * Consulta al modelo usando la API de generate con formato mejorado
  * @param {Object} promptData - Datos del prompt
- * @param {string} promptData.systemPrompt - Instrucciones del sistema
- * @param {string} promptData.userPrompt - Mensaje del usuario
  * @param {Object} options - Opciones adicionales
  * @returns {Promise<string>} - Respuesta del modelo
  */
-async function queryModel(promptData, options = {}) {
+async function queryModelGenerate(promptData, options = {}) {
     const maxRetries = options.maxRetries || CONFIG.maxRetries;
     
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
-            logger.debug(`Intento ${attempt}/${maxRetries} de consulta al modelo`);
+            logger.debug(`Intento ${attempt}/${maxRetries} de consulta al modelo (generate API)`);
             
-            // Combinar system prompt y user prompt para API de generate
-            const fullPrompt = promptData.systemPrompt 
-                ? `${promptData.systemPrompt}\n\nUsuario: ${promptData.userPrompt}\nAsistente:`
-                : promptData.userPrompt;
+            let fullPrompt = '';
+            
+            // Si vienen mensajes en formato de chat, convertirlos
+            if (Array.isArray(promptData)) {
+                const systemMessage = promptData.find(m => m.role === 'system');
+                const conversationParts = [];
+                
+                if (systemMessage) {
+                    conversationParts.push(`Sistema: ${systemMessage.content}`);
+                }
+                
+                // Incluir historial de conversación si existe
+                promptData.forEach(msg => {
+                    if (msg.role === 'user') {
+                        conversationParts.push(`Usuario: ${msg.content}`);
+                    } else if (msg.role === 'assistant' && msg !== systemMessage) {
+                        conversationParts.push(`Asistente: ${msg.content}`);
+                    }
+                });
+                
+                fullPrompt = conversationParts.join('\n\n') + '\nAsistente:';
+            } else {
+                // Formato antiguo
+                fullPrompt = promptData.systemPrompt 
+                    ? `Sistema: ${promptData.systemPrompt}\n\nUsuario: ${promptData.userPrompt}\nAsistente:`
+                    : promptData.userPrompt;
+            }
             
             const requestBody = {
-                model: process.env.OLLAMA_MODEL || 'llama3:8b',
+                model: process.env.OLLAMA_MODEL || 'qwen2.5:14b',
                 prompt: fullPrompt,
                 stream: false,
                 options: {
                     temperature: options.temperature || CONFIG.temperature,
                     top_p: CONFIG.topP,
                     top_k: CONFIG.topK,
-                    stop: ['\nUsuario:', '\nUser:']
+                    stop: ['\nUsuario:', '\nUser:', '\nSistema:']
                 }
             };
-            
-            logger.debug(`Enviando request a: ${process.env.OLLAMA_API_URL}/generate`);
             
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), CONFIG.timeout);
@@ -106,15 +127,13 @@ async function queryModel(promptData, options = {}) {
         } catch (error) {
             logger.error(`Error en intento ${attempt}/${maxRetries}: ${error.message}`);
             
-            // Si es el último intento o no es un error recuperable
-            if (attempt === maxRetries || (!isModelLoadingError(error.message) && !error.name === 'AbortError')) {
+            if (attempt === maxRetries || (!isModelLoadingError(error.message) && error.name !== 'AbortError')) {
                 if (error.name === 'AbortError') {
                     throw new Error(`Timeout: La respuesta del modelo excedió el tiempo límite de ${CONFIG.timeout}ms`);
                 }
                 throw error;
             }
             
-            // Esperar antes del siguiente intento con backoff exponencial
             const delay = CONFIG.retryDelay * Math.pow(2, attempt - 1);
             logger.info(`Esperando ${delay}ms antes del siguiente intento...`);
             await sleep(delay);
@@ -125,7 +144,17 @@ async function queryModel(promptData, options = {}) {
 }
 
 /**
- * Detecta las intenciones presentes en el mensaje del usuario (sin contexto)
+ * Consulta al modelo - interfaz unificada
+ * @param {Object|Array} promptData - Datos del prompt o array de mensajes
+ * @param {Object} options - Opciones adicionales
+ * @returns {Promise<string>} - Respuesta del modelo
+ */
+async function queryModel(promptData, options = {}) {
+    return await queryModelGenerate(promptData, options);
+}
+
+/**
+ * Detecta las intenciones usando el formato mejorado
  * @param {string} message - Mensaje del usuario
  * @param {string} templateName - Nombre de la plantilla a usar
  * @param {Object} variables - Variables para la plantilla
@@ -134,16 +163,24 @@ async function queryModel(promptData, options = {}) {
  */
 async function detectIntentions(message, templateName = 'intent-detection', variables = {}, options = {}) {
     try {
-        const systemPrompt = renderTemplate(
+        const systemContent = renderTemplate(
             require('../utils/promptTemplates').baseTemplates[templateName] || 
             require('../utils/promptTemplates').baseTemplates['intent-detection'],
             variables
         );
 
-        const response = await queryModel({
-            systemPrompt,
-            userPrompt: message
-        }, options);
+        const messages = [
+            {
+                role: "system",
+                content: systemContent
+            },
+            {
+                role: "user",
+                content: message
+            }
+        ];
+
+        const response = await queryModel(messages, options);
         
         return parseIntentResponse(response);
     } catch (error) {
@@ -153,7 +190,7 @@ async function detectIntentions(message, templateName = 'intent-detection', vari
 }
 
 /**
- * Detecta intenciones considerando el contexto conversacional
+ * Detecta intenciones con contexto conversacional
  * @param {string} message - Mensaje del usuario
  * @param {Object} context - Contexto conversacional
  * @param {string} templateName - Nombre de la plantilla a usar
@@ -163,7 +200,10 @@ async function detectIntentions(message, templateName = 'intent-detection', vari
  */
 async function detectIntentionsWithContext(message, context, templateName = 'contextual-intent-detection', variables = {}, options = {}) {
     try {
-        // Plantilla contextual para detección de intenciones
+        // Construir el historial de mensajes incluyendo el contexto
+        const messages = [];
+        
+        // Plantilla contextual mejorada
         const contextualTemplate = `
 Eres un especialista en análisis de intenciones para un chatbot de WhatsApp que ayuda con un sistema {{serviceType}} empresarial.
 
@@ -188,21 +228,6 @@ Tema actual de conversación: {{context.currentTopic}}
 Fuerza del contexto: {{context.contextStrength}}
 {{/if}}
 
-{{#if context.recentMessages}}
-Últimos mensajes de la conversación:
-{{#each context.recentMessages}}
-{{#if this.isFromUser}}Usuario{{else}}Bot{{/if}}: "{{this.message}}"
-{{/each}}
-{{/if}}
-
-{{#if context.recentIntents}}
-Intenciones recientes: {{JSON.stringify context.recentIntents}}
-{{/if}}
-
-{{#if context.topicHistory}}
-Temas previos: {{JSON.stringify context.topicHistory}}
-{{/if}}
-
 ### INSTRUCCIONES ###
 Analiza el mensaje actual del usuario considerando TODO el contexto conversacional.
 
@@ -215,26 +240,6 @@ INTENCIONES POSIBLES:
 {{#each supportedIntents}}
 - {{this}}
 {{/each}}
-
-### EJEMPLOS CONTEXTUALES ###
-
-Ejemplo 1 - Continuidad:
-Contexto: Usuario pidió información sobre el ERP, tema actual: service_interest
-Usuario: "Me interesa, ¿cómo puedo probarlo?"
-Análisis: Continúa tema actual + nueva intención solicitud_prueba
-Respuesta: {"intents": ["interes_en_servicio", "solicitud_prueba"]}
-
-Ejemplo 2 - Confirmación contextual:
-Contexto: Bot preguntó "¿Tu nombre es Juan Pérez?", usuario conocido: Juan Pérez
-Usuario: "Sí"
-Análisis: Confirmación del nombre en contexto
-Respuesta: {"intents": ["confirmacion"]}
-
-Ejemplo 3 - Cambio de tema:
-Contexto: Usuario estaba pidiendo prueba, tema actual: trial_request
-Usuario: "Antes de eso, ¿cuánto cuesta?"
-Análisis: Cambio a consulta de precio
-Respuesta: {"intents": ["consulta_precio"]}
 
 ### IMPORTANTE ###
 - Considera SIEMPRE el contexto conversacional
@@ -250,11 +255,31 @@ Formato de respuesta requerido:
             ...variables,
             context: context
         });
+        
+        messages.push({
+            role: "system",
+            content: systemPrompt
+        });
+        
+        // Agregar mensajes recientes del contexto si existen
+        if (context.recentMessages && context.recentMessages.length > 0) {
+            // Limitar a los últimos 4 mensajes para no sobrecargar
+            const recentMessages = context.recentMessages.slice(-4);
+            recentMessages.forEach(msg => {
+                messages.push({
+                    role: msg.isFromUser ? "user" : "assistant",
+                    content: msg.message
+                });
+            });
+        }
+        
+        // Agregar el mensaje actual del usuario
+        messages.push({
+            role: "user",
+            content: message
+        });
 
-        const response = await queryModel({
-            systemPrompt,
-            userPrompt: message
-        }, options);
+        const response = await queryModel(messages, options);
         
         const result = parseIntentResponse(response);
         
@@ -274,7 +299,7 @@ Formato de respuesta requerido:
 }
 
 /**
- * Extrae entidades relevantes del mensaje del usuario (sin contexto)
+ * Extrae entidades
  * @param {string} message - Mensaje del usuario
  * @param {string} templateName - Nombre de la plantilla a usar
  * @param {Object} variables - Variables para la plantilla
@@ -283,16 +308,24 @@ Formato de respuesta requerido:
  */
 async function extractEntities(message, templateName = 'entity-extraction', variables = {}, options = {}) {
     try {
-        const systemPrompt = renderTemplate(
+        const systemContent = renderTemplate(
             require('../utils/promptTemplates').baseTemplates[templateName] || 
             require('../utils/promptTemplates').baseTemplates['entity-extraction'],
             variables
         );
 
-        const response = await queryModel({
-            systemPrompt,
-            userPrompt: message
-        }, options);
+        const messages = [
+            {
+                role: "system",
+                content: systemContent
+            },
+            {
+                role: "user",
+                content: message
+            }
+        ];
+
+        const response = await queryModel(messages, options);
         
         return parseEntityResponse(response);
     } catch (error) {
@@ -302,7 +335,7 @@ async function extractEntities(message, templateName = 'entity-extraction', vari
 }
 
 /**
- * Extrae entidades considerando el contexto conversacional
+ * Extrae entidades con contexto
  * @param {string} message - Mensaje del usuario
  * @param {Object} context - Contexto conversacional
  * @param {string} templateName - Nombre de la plantilla a usar
@@ -312,6 +345,8 @@ async function extractEntities(message, templateName = 'entity-extraction', vari
  */
 async function extractEntitiesWithContext(message, context, templateName = 'contextual-entity-extraction', variables = {}, options = {}) {
     try {
+        const messages = [];
+        
         // Plantilla contextual para extracción de entidades
         const contextualTemplate = `
 Eres un especialista en extracción de entidades para un chatbot empresarial de WhatsApp.
@@ -332,13 +367,6 @@ Entidades ya conocidas del usuario:
 {{/each}}
 {{/if}}
 
-{{#if context.recentMessages}}
-Últimos mensajes de la conversación:
-{{#each context.recentMessages}}
-{{#if this.isFromUser}}Usuario{{else}}Bot{{/if}}: "{{this.message}}"
-{{/each}}
-{{/if}}
-
 ### INSTRUCCIONES ###
 Extrae SOLO las entidades nuevas o actualizadas presentes en el mensaje actual.
 
@@ -354,27 +382,6 @@ ENTIDADES A BUSCAR:
 4. Prioriza información explícita sobre implícita
 5. Si hay ambigüedad, no asumas
 
-### EJEMPLOS CONTEXTUALES ###
-
-Ejemplo 1 - Nueva información:
-Contexto conocido: nombre="Juan Pérez"
-Usuario: "Mi email es juan@empresa.com"
-Extraer: {"email": "juan@empresa.com"}
-
-Ejemplo 2 - Confirmación sin nueva info:
-Contexto conocido: nombre="Juan Pérez"
-Usuario: "Sí, ese es mi nombre"
-Extraer: {} (no hay entidades nuevas)
-
-Ejemplo 3 - Corrección:
-Contexto conocido: nombre="Juan Pérez"
-Usuario: "Perdón, mi nombre es Juan Carlos Pérez"
-Extraer: {"nombre": "Juan Carlos Pérez"}
-
-Ejemplo 4 - Credenciales juntas:
-Usuario: "usuario123 MiClave456!"
-Extraer: {"usuario": "usuario123", "clave": "MiClave456!"}
-
 ### IMPORTANTE ###
 - Solo incluye entidades que REALMENTE encuentres en el mensaje actual
 - No inventes información que no esté presente
@@ -388,15 +395,32 @@ Formato de respuesta requerido:
             ...variables,
             context: context
         });
+        
+        messages.push({
+            role: "system",
+            content: systemPrompt
+        });
+        
+        // Agregar algunos mensajes recientes para contexto
+        if (context.recentMessages && context.recentMessages.length > 0) {
+            const recentMessages = context.recentMessages.slice(-4);
+            recentMessages.forEach(msg => {
+                messages.push({
+                    role: msg.isFromUser ? "user" : "assistant",
+                    content: msg.message
+                });
+            });
+        }
+        
+        // Mensaje actual
+        messages.push({
+            role: "user",
+            content: message
+        });
 
-        const response = await queryModel({
-            systemPrompt,
-            userPrompt: message
-        }, options);
+        const response = await queryModel(messages, options);
         
-        const result = parseEntityResponse(response);
-        
-        return result;
+        return parseEntityResponse(response);
     } catch (error) {
         logger.error(`Error al extraer entidades con contexto: ${error.message}`);
         // Fallback a extracción sin contexto
@@ -405,7 +429,7 @@ Formato de respuesta requerido:
 }
 
 /**
- * Genera una respuesta contextual para el usuario
+ * Genera una respuesta contextual
  * @param {string} message - Mensaje original del usuario
  * @param {Array} intents - Intenciones detectadas
  * @param {Object} entities - Entidades extraídas
@@ -416,29 +440,18 @@ Formato de respuesta requerido:
  */
 async function generateResponse(message, intents, entities, userData = null, conversationContext = {}, options = {}) {
     try {
-        const systemPrompt = `Eres un asistente virtual profesional de WhatsApp para un sistema ERP empresarial llamado "ERP Demo".
+        const messages = [];
+        
+        // Mensaje del sistema con instrucciones y contexto
+        const systemMessage = {
+            role: "system",
+            content: `Eres un asistente virtual profesional de WhatsApp para un sistema ERP empresarial llamado "ERP Demo".
 
 Tu trabajo es ayudar a los usuarios con:
 - Información sobre el servicio ERP
 - Crear cuentas de prueba gratuitas (7 días)
 - Resolver dudas técnicas básicas
 - Proporcionar información de contacto para soporte avanzado
-
-CONTEXTO ACTUAL:
-- Mensaje del usuario: "${message}"
-- Intenciones detectadas: ${JSON.stringify(intents)}
-- Entidades extraídas: ${JSON.stringify(entities)}
-- Usuario existente: ${userData ? `${userData.name} (${userData.email})` : 'No registrado'}
-- Estado de conversación: ${conversationContext.conversationState || 'Ninguno'}
-- Tema actual: ${conversationContext.currentTopic || 'General'}
-
-${userData ? `
-INFORMACIÓN DEL USUARIO:
-- Nombre: ${userData.name}
-- Email: ${userData.email}
-- Empresa: ${userData.company || 'No especificada'}
-- Cargo: ${userData.position || 'No especificado'}
-` : ''}
 
 CARACTERÍSTICAS DEL ERP:
 - Gestión de inventario
@@ -462,19 +475,42 @@ INSTRUCCIONES:
 
 MANEJO DE CONFIRMACIONES:
 - Si el usuario confirma ("sí", "correcto", "exacto") y hay un flujo activo, continúa el proceso
-- Si el usuario confirma información personal, agradece y continúa
+- Si el usuario confirma información personal, agradece y continúa`
+        };
+        
+        messages.push(systemMessage);
+        
+        // Si hay historial de conversación, incluir algunos mensajes relevantes
+        if (conversationContext.recentMessages && conversationContext.recentMessages.length > 0) {
+            // Incluir los últimos 2-3 intercambios para mantener contexto
+            const recentMessages = conversationContext.recentMessages.slice(-6);
+            recentMessages.forEach(msg => {
+                messages.push({
+                    role: msg.isFromUser ? "user" : "assistant",
+                    content: msg.message
+                });
+            });
+        }
+        
+        // Mensaje del usuario con contexto adicional
+        const userMessage = {
+            role: "user",
+            content: `[CONTEXTO]
+Intenciones detectadas: ${JSON.stringify(intents)}
+Entidades extraídas: ${JSON.stringify(entities)}
+${userData ? `Usuario: ${userData.name} (${userData.email})` : 'Usuario no registrado'}
+Estado: ${conversationContext.conversationState || 'Ninguno'}
+Tema: ${conversationContext.currentTopic || 'General'}
 
-EJEMPLOS DE RESPUESTAS:
-- Saludo: "${userData ? `¡Hola ${userData.name}!` : '¡Hola!'} Soy el asistente virtual de ERP Demo. ¿En qué puedo ayudarte hoy?"
-- Interés: "Me alegra tu interés en ERP Demo${userData && userData.company ? ` para ${userData.company}` : ''}. Nuestro sistema incluye gestión completa de inventario, facturación, contabilidad y más. ¿Te gustaría una prueba gratuita de 7 días?"
-- Solicitud prueba: "Perfecto${userData ? `, ${userData.name}` : ''}. Puedo crear tu cuenta de prueba. ${userData && userData.email ? 'Ya tengo tu información de contacto.' : 'Necesito tu nombre completo y email.'} ¿Qué nombre de usuario y contraseña te gustaría usar?"
+[MENSAJE DEL USUARIO]
+${message}
 
-Responde de manera natural al mensaje del usuario considerando toda la información proporcionada.`;
+Por favor responde de manera apropiada considerando toda la información proporcionada.`
+        };
+        
+        messages.push(userMessage);
 
-        const response = await queryModel({
-            systemPrompt,
-            userPrompt: `Genera una respuesta apropiada para este contexto.`
-        }, {
+        const response = await queryModel(messages, {
             ...options,
             temperature: 0.7 // Temperatura más alta para respuestas más creativas
         });
@@ -486,11 +522,7 @@ Responde de manera natural al mensaje del usuario considerando toda la informaci
     }
 }
 
-/**
- * Obtiene las intenciones relacionadas con un tema específico
- * @param {string} topic - Tema actual
- * @returns {Array} - Intenciones relacionadas
- */
+// Funciones auxiliares
 function getIntentsForTopic(topic) {
     const topicIntentMapping = {
         'trial_request': ['solicitud_prueba', 'confirmacion', 'interes_en_servicio'],
@@ -504,165 +536,114 @@ function getIntentsForTopic(topic) {
         'farewell': ['despedida', 'agradecimiento'],
         'gratitude': ['agradecimiento', 'despedida'],
         'confirmation': ['confirmacion'],
-        'general': ['saludo', 'despedida', 'interes_en_servicio', 'solicitud_prueba', 'confirmacion', 'agradecimiento', 'soporte_tecnico', 'consulta_precio', 'consulta_caracteristicas', 'queja', 'cancelacion']
+        'general': []
     };
     
     return topicIntentMapping[topic] || [];
 }
 
-/**
- * Parsea la respuesta del modelo para extraer intenciones
- * @param {string} response - Respuesta del modelo
- * @returns {Object} - Objeto con intenciones detectadas
- */
 function parseIntentResponse(response) {
     try {
         // Buscar JSON en la respuesta
-        const jsonMatch = response.match(/\{[^}]*"intents"[^}]*\}/);
-        if (!jsonMatch) {
-            logger.debug(`No se encontró JSON válido en respuesta de intenciones: ${response}`);
-            return { intents: [] };
+        const jsonMatch = response.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+            const parsed = JSON.parse(jsonMatch[0]);
+            
+            // Validar que las intenciones sean válidas
+            const validIntents = [
+                'saludo', 'despedida', 'interes_en_servicio', 'solicitud_prueba',
+                'confirmacion', 'agradecimiento', 'soporte_tecnico', 'consulta_precio',
+                'consulta_caracteristicas', 'queja', 'cancelacion'
+            ];
+            
+            if (parsed.intents && Array.isArray(parsed.intents)) {
+                parsed.intents = parsed.intents.filter(intent => validIntents.includes(intent));
+            }
+            
+            return parsed;
         }
         
-        const parsed = JSON.parse(jsonMatch[0]);
-        
-        // Validar que intents sea un array
-        if (!Array.isArray(parsed.intents)) {
-            logger.warn(`Intents no es un array: ${JSON.stringify(parsed)}`);
-            return { intents: [] };
-        }
-        
-        // Filtrar intenciones válidas
-        const validIntents = [
-            'saludo', 'despedida', 'interes_en_servicio', 'solicitud_prueba', 
-            'confirmacion', 'agradecimiento', 'soporte_tecnico', 'consulta_precio', 
-            'consulta_caracteristicas', 'queja', 'cancelacion'
-        ];
-        
-        const filteredIntents = parsed.intents.filter(intent => 
-            validIntents.includes(intent)
-        );
-        
-        return { intents: filteredIntents };
+        return { intents: [] };
     } catch (error) {
-        logger.debug(`Error parseando intenciones: ${error.message}`);
+        logger.error(`Error parseando respuesta de intenciones: ${error.message}`);
         return { intents: [] };
     }
 }
 
-/**
- * Parsea la respuesta del modelo para extraer entidades
- * @param {string} response - Respuesta del modelo
- * @returns {Object} - Objeto con entidades extraídas
- */
 function parseEntityResponse(response) {
     try {
-        // Si la respuesta indica explícitamente que no hay entidades
-        if (response.toLowerCase().includes('no se encontraron entidades') || 
-            response.toLowerCase().includes('no hay entidades') ||
-            response.toLowerCase().includes('no entities found') ||
-            response.toLowerCase().includes('objeto vacío')) {
-            return {};
-        }
-        
         // Buscar JSON en la respuesta
-        const jsonMatch = response.match(/\{[^}]*\}/);
-        if (!jsonMatch) {
-            logger.debug(`No se encontró JSON válido en respuesta de entidades: ${response}`);
-            return {};
-        }
-        
-        const parsed = JSON.parse(jsonMatch[0]);
-        
-        // Validar que sea un objeto
-        if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-            logger.debug(`Respuesta de entidades no es un objeto válido: ${typeof parsed}`);
-            return {};
-        }
-        
-        // Filtrar solo entidades válidas y limpiar valores
-        const validEntities = [
-            'nombre', 'email', 'usuario', 'clave', 'empresa', 
-            'telefono', 'cargo', 'industria', 'numero_empleados'
-        ];
-        
-        const filtered = {};
-        
-        for (const [key, value] of Object.entries(parsed)) {
-            if (validEntities.includes(key) && value && typeof value === 'string') {
-                const cleanValue = value.trim();
-                if (cleanValue.length > 0) {
-                    filtered[key] = cleanValue;
+        const jsonMatch = response.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+            const parsed = JSON.parse(jsonMatch[0]);
+            
+            // Validar y limpiar entidades
+            const validEntities = [
+                'nombre', 'email', 'telefono', 'empresa', 'cargo',
+                'usuario', 'clave', 'fecha', 'numero_empleados', 'industria'
+            ];
+            
+            const cleanedEntities = {};
+            for (const [key, value] of Object.entries(parsed)) {
+                if (validEntities.includes(key) && value && value.toString().trim() !== '') {
+                    cleanedEntities[key] = value.toString().trim();
                 }
             }
+            
+            return cleanedEntities;
         }
         
-        return filtered;
+        return {};
     } catch (error) {
-        logger.debug(`Error parseando entidades (normal si no hay entidades): ${error.message}`);
+        logger.error(`Error parseando respuesta de entidades: ${error.message}`);
         return {};
     }
 }
 
-/**
- * Prueba la conexión con el servicio de Ollama
- * @returns {Promise<boolean>} - true si la conexión es exitosa
- */
 async function testConnection() {
     try {
-        logger.info('🔄 Probando conexión con Ollama...');
+        logger.info('Probando conexión con Ollama...');
         
         const response = await queryModel({
-            systemPrompt: 'Responde con exactamente estas palabras: "Conexión exitosa"',
-            userPrompt: 'Hola'
-        }, {
-            maxRetries: 1,
-            timeout: 10000
-        });
+            systemPrompt: "Eres un asistente de prueba. Responde con 'OK' si recibes este mensaje.",
+            userPrompt: "Test"
+        }, { maxRetries: 1 });
         
-        if (response.toLowerCase().includes('conexión exitosa')) {
-            logger.info(`✅ Conexión con Ollama exitosa: ${response.trim()}`);
-            return true;
-        } else {
-            logger.warn(`⚠️ Respuesta inesperada de Ollama: ${response}`);
-            return false;
-        }
+        const success = response.toLowerCase().includes('ok');
+        logger.info(`Prueba de conexión: ${success ? 'EXITOSA' : 'FALLIDA'}`);
+        
+        return success;
     } catch (error) {
-        logger.error(`❌ Error en prueba de conexión: ${error.message}`);
+        logger.error(`Error en prueba de conexión: ${error.message}`);
         return false;
     }
 }
 
-/**
- * Obtiene información sobre el modelo actual
- * @returns {Promise<Object>} - Información del modelo
- */
 async function getModelInfo() {
     try {
         const response = await fetch(`${process.env.OLLAMA_API_URL}/show`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: process.env.OLLAMA_MODEL || 'llama3:8b' })
+            body: JSON.stringify({ name: process.env.OLLAMA_MODEL || 'qwen2.5:14b' })
         });
         
         if (response.ok) {
             const data = await response.json();
             return {
-                model: data.model,
-                size: data.size,
-                parameters: data.parameters,
-                template: data.template
+                model: data.model || process.env.OLLAMA_MODEL,
+                details: data.details || {},
+                parameters: data.parameters || {}
             };
-        } else {
-            throw new Error(`Error HTTP ${response.status}`);
         }
+        
+        return null;
     } catch (error) {
         logger.error(`Error obteniendo información del modelo: ${error.message}`);
         return null;
     }
 }
 
-// Exportar todas las funciones
+// Exportar funciones
 module.exports = {
     queryModel,
     detectIntentions,
@@ -674,6 +655,5 @@ module.exports = {
     parseEntityResponse,
     testConnection,
     getModelInfo,
-    getIntentsForTopic,
     CONFIG
 };

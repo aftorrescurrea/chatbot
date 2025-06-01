@@ -215,20 +215,6 @@ const generateIntentBasedResponse = async (message, intents, entities, userData,
     const primaryIntent = intents[0];
     const userName = getUserName(userData, conversationContext);
     
-    // Verificar si la intención tiene un flujo específico en la base de datos
-    try {
-        const Intent = require('../models/Intent');
-        const intentData = await Intent.findByName(primaryIntent);
-        
-        // Si es una intención de tutorial sin flujo activo, generar respuesta inicial
-        if (intentData && intentData.category === 'tutorial' && !conversationContext.activeFlow) {
-            return generateTutorialInitiationResponse(intentData, userName, userData, conversationContext);
-        }
-    } catch (error) {
-        logger.debug(`Error al verificar intención en DB: ${error.message}`);
-    }
-    
-    // Switch para intenciones conocidas
     switch (primaryIntent) {
         case 'saludo':
             return generateGreetingResponse(userName, userData, conversationContext, responseContext);
@@ -494,25 +480,6 @@ const getUserName = (userData, conversationContext) => {
     }
     
     return null;
-};
-
-const generateTutorialInitiationResponse = (intentData, userName, userData, conversationContext) => {
-    const greeting = userName ? `${userName}, ` : '';
-    
-    // Generar respuesta basada en los datos de la intención
-    let response = `${greeting}veo que necesitas ayuda con ${intentData.displayName.toLowerCase()}. `;
-    
-    // Si tiene pasos definidos, mencionar que es un tutorial paso a paso
-    if (intentData.flowSteps && intentData.flowSteps.length > 0) {
-        response += `Te voy a guiar paso a paso. `;
-        response += `Este tutorial tiene ${intentData.flowSteps.length} pasos. `;
-        response += `¿Estás listo para comenzar?`;
-    } else {
-        // Si no tiene pasos, ofrecer ayuda general
-        response += `¿Qué específicamente necesitas saber?`;
-    }
-    
-    return response;
 };
 
 // Exportar todas las funciones

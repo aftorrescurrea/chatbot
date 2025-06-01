@@ -16,6 +16,8 @@ const {
     clearConversationMemory
 } = require('../services/MemoryService');
 const { logger } = require('../utils/logger');
+const tutorialFlowService = require('../services/tutorialFlowService');
+const Intent = require('../models/Intent');
 const { generalConfig } = require('../config/promptConfig');
 const {
     startOrUpdateSession,
@@ -289,7 +291,26 @@ const processIntentsWithContext = async (intents, entities, user, phoneNumber, c
         
         logger.info(`*** EJECUTANDO SWITCH PARA INTENCIÓN: "${primaryIntent}" ***`);
         
-        // Iniciar nuevo flujo basado en la intención principal
+        // Buscar si la intención tiene un flujo específico en la base de datos
+        const intentData = await Intent.findByName(primaryIntent);
+        
+        if (intentData && intentData.hasSpecificFlow) {
+            logger.info(`Intención "${primaryIntent}" tiene flujo específico: ${intentData.flowType}`);
+            
+            // Si es una intención de tutorial, usar el servicio de tutoriales
+            if (intentData.category === 'tutorial') {
+                const tutorialResult = await startTutorialFlow(
+                    primaryIntent,
+                    entities,
+                    user,
+                    phoneNumber,
+                    conversationContext
+                );
+                return { ...result, ...tutorialResult };
+            }
+        }
+        
+        // Flujos específicos hardcodeados (se mantendrán hasta migración completa)
         switch (primaryIntent) {
             case 'solicitud_prueba':
                 logger.info(`*** ENTRANDO A CASE solicitud_prueba ***`);
@@ -458,13 +479,50 @@ const handleConfirmationWithContext = async (entities, user, phoneNumber, conver
  * @returns {Object} - Resultado del flujo
  */
 const continueActiveFlow = async (phoneNumber, intents, entities, conversationContext) => {
+    const activeFlow = conversationContext.activeFlow;
+    
     const result = {
         completed: false,
         credentials: null,
-        flowType: conversationContext.activeFlow.flowType
+        flowType: activeFlow.flowType
     };
     
-    switch (conversationContext.activeFlow.flowType) {
+    // Verificar si es un flujo de tutorial
+    if (activeFlow.flowType && activeFlow.flowType.endsWith('_tutorial_flow')) {
+        const userResponse = conversationContext.recentMessages ?
+            conversationContext.recentMessages[conversationContext.recentMessages.length - 1]?.content : '';
+        
+        const tutorialResult = await tutorialFlowService.continueFlow(
+            activeFlow,
+            userResponse,
+            entities,
+            conversationContext
+        );
+        
+        if (tutorialResult.completed) {
+            activeFlowStates.delete(phoneNumber);
+            return {
+                completed: true,
+                message: tutorialResult.message,
+                flowData: tutorialResult.flowData,
+                flowType: activeFlow.flowType
+            };
+        } else {
+            // Actualizar estado del flujo
+            activeFlowStates.set(phoneNumber, tutorialResult.flowState);
+            return {
+                completed: false,
+                message: tutorialResult.message,
+                requiresInput: tutorialResult.requiresInput,
+                currentStep: tutorialResult.currentStep,
+                totalSteps: tutorialResult.totalSteps,
+                flowType: activeFlow.flowType
+            };
+        }
+    }
+    
+    // Flujos legacy (trial_request, support_request)
+    switch (activeFlow.flowType) {
         case 'trial_request':
             const trialResult = await continueTrialRequestFlow(phoneNumber, entities, conversationContext);
             return { ...result, ...trialResult };
@@ -474,7 +532,7 @@ const continueActiveFlow = async (phoneNumber, intents, entities, conversationCo
             break;
             
         default:
-            logger.warn(`Tipo de flujo desconocido: ${conversationContext.activeFlow.flowType}`);
+            logger.warn(`Tipo de flujo desconocido: ${activeFlow.flowType}`);
     }
     
     return result;
@@ -645,6 +703,55 @@ const generateContextualResponse = async (message, intents, entities, userData, 
     } catch (error) {
         logger.error(`Error al generar respuesta contextual: ${error.message}`);
         return "Lo siento, estoy teniendo problemas técnicos. Por favor, intenta de nuevo.";
+    }
+};
+
+/**
+ * Inicia un flujo de tutorial basado en la intención
+ * @param {string} intentName - Nombre de la intención
+ * @param {Object} entities - Entidades extraídas
+ * @param {Object} user - Usuario
+ * @param {string} phoneNumber - Número de teléfono
+ * @param {Object} conversationContext - Contexto de conversación
+ * @returns {Object} - Resultado del flujo
+ */
+const startTutorialFlow = async (intentName, entities, user, phoneNumber, conversationContext) => {
+    try {
+        logger.info(`Iniciando flujo de tutorial para intención: ${intentName}`);
+        
+        const flowResult = await tutorialFlowService.startTutorialFlow(
+            intentName,
+            entities,
+            user,
+            phoneNumber,
+            conversationContext
+        );
+        
+        if (flowResult.started) {
+            // Guardar estado del flujo activo
+            activeFlowStates.set(phoneNumber, flowResult.flowState);
+            
+            logger.info(`Flujo de tutorial iniciado exitosamente para ${phoneNumber}`);
+            
+            return {
+                completed: false,
+                flowType: flowResult.flowState.flowType,
+                message: flowResult.message,
+                requiresInput: flowResult.requiresInput
+            };
+        } else {
+            logger.warn(`No se pudo iniciar flujo de tutorial para ${intentName}`);
+            return {
+                completed: false,
+                flowType: null
+            };
+        }
+    } catch (error) {
+        logger.error(`Error al iniciar flujo de tutorial: ${error.message}`);
+        return {
+            completed: false,
+            flowType: null
+        };
     }
 };
 

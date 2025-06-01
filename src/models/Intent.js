@@ -28,6 +28,37 @@ const intentSchema = new mongoose.Schema({
     type: Boolean,
     default: true
   },
+  // Nuevos campos para el sistema mejorado
+  category: {
+    type: String,
+    enum: ['general', 'tutorial', 'support', 'sales', 'complaint', 'greeting'],
+    default: 'general'
+  },
+  hasSpecificFlow: {
+    type: Boolean,
+    default: false
+  },
+  flowType: {
+    type: String,
+    default: null
+  },
+  subIntents: [{
+    name: String,
+    keywords: [String],
+    examples: [String],
+    description: String
+  }],
+  responseStrategy: {
+    type: String,
+    enum: ['static', 'dynamic', 'flow', 'contextual'],
+    default: 'contextual'
+  },
+  flowSteps: [{
+    stepNumber: Number,
+    message: String,
+    requiresInput: Boolean,
+    validationRules: mongoose.Schema.Types.Mixed
+  }],
   metadata: {
     type: Map,
     of: mongoose.Schema.Types.Mixed,
@@ -38,8 +69,9 @@ const intentSchema = new mongoose.Schema({
 });
 
 // Índices para mejorar las búsquedas
-// El índice en 'name' ya está definido con unique: true
 intentSchema.index({ isActive: 1 });
+intentSchema.index({ category: 1 });
+intentSchema.index({ hasSpecificFlow: 1 });
 
 // Método para obtener intenciones activas
 intentSchema.statics.getActiveIntents = function() {
@@ -49,6 +81,16 @@ intentSchema.statics.getActiveIntents = function() {
 // Método para buscar por nombre
 intentSchema.statics.findByName = function(name) {
   return this.findOne({ name: name.toLowerCase() });
+};
+
+// Método para obtener intenciones con flujos específicos
+intentSchema.statics.getIntentsWithFlows = function() {
+  return this.find({ hasSpecificFlow: true, isActive: true });
+};
+
+// Método para obtener intenciones por categoría
+intentSchema.statics.getByCategory = function(category) {
+  return this.find({ category: category, isActive: true }).sort({ priority: 1 });
 };
 
 module.exports = mongoose.model('Intent', intentSchema);
