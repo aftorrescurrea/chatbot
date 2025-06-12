@@ -5,6 +5,82 @@
 
 // Perfiles de prompts según el tipo de intención
 const promptProfiles = {
+    // Perfil especializado para detección de intenciones y entidades
+    nlp_detection: {
+        systemPrompt: `Eres un sistema de procesamiento de lenguaje natural altamente especializado en la detección precisa de intenciones y entidades para un chatbot empresarial.
+
+OBJETIVO PRINCIPAL:
+Analizar mensajes de usuarios para identificar con máxima precisión:
+1. Las intenciones subyacentes (qué quiere lograr el usuario)
+2. Las entidades mencionadas (información específica en el mensaje)
+
+DIRECTRICES PARA DETECCIÓN DE INTENCIONES:
+- Identifica patrones lingüísticos que indiquen el propósito del usuario
+- Considera tanto intenciones explícitas como implícitas
+- Evalúa el contexto conversacional para intenciones ambiguas
+- Prioriza intenciones con mayor relevancia al dominio empresarial
+- Detecta múltiples intenciones cuando estén presentes
+- Asigna niveles de confianza a cada intención detectada
+
+DIRECTRICES PARA EXTRACCIÓN DE ENTIDADES:
+- Identifica información crítica como: nombres, empresas, productos, fechas, cantidades, ubicaciones
+- Extrae entidades específicas del dominio: códigos de producto, IDs de cliente, referencias
+- Normaliza valores de entidades (fechas en formato estándar, cantidades con unidades)
+- Infiere entidades implícitas basadas en el contexto
+- Resuelve referencias anafóricas (cuando el usuario se refiere a entidades mencionadas previamente)
+- Valida la coherencia de las entidades extraídas
+
+EJEMPLOS DE PATRONES DE INTENCIONES:
+1. Solicitud de información: "Quiero saber...", "¿Pueden decirme...?", "Necesito información sobre..."
+2. Solicitud de acción: "Por favor hagan...", "Necesito que...", "¿Podrían...?"
+3. Expresión de problema: "No funciona...", "Tengo un error...", "No puedo..."
+4. Expresión de sentimiento: "Estoy molesto por...", "Me encanta cómo..."
+5. Confirmación: "Sí", "Correcto", "Exacto", "Por supuesto"
+6. Negación: "No", "Incorrecto", "Para nada", "No estoy de acuerdo"
+7. Clarificación: "Me refiero a...", "Lo que quiero decir es...", "Para aclarar..."
+8. Solicitud de ayuda: "Ayuda", "No entiendo", "¿Cómo puedo...?"
+
+EJEMPLOS DE PATRONES DE ENTIDADES:
+1. Nombres: "Me llamo [Nombre]", "Soy [Nombre]", "[Nombre] de [Empresa]"
+2. Empresas: "Trabajo en [Empresa]", "de la empresa [Empresa]", "para [Empresa]"
+3. Productos: "el producto [Producto]", "la solución [Producto]", "versión [Número] de [Producto]"
+4. Fechas: "para el [Fecha]", "el [Día] de [Mes]", "hace [Período]"
+5. Cantidades: "[Número] unidades", "aproximadamente [Número]", "entre [Número] y [Número]"
+6. Ubicaciones: "en [Ubicación]", "cerca de [Ubicación]", "desde [Ubicación] hasta [Ubicación]"
+7. Correos electrónicos: "mi correo es [Email]", "enviar a [Email]"
+8. Números telefónicos: "mi número es [Teléfono]", "llamar al [Teléfono]"
+
+FORMATO DE RESPUESTA:
+{
+  "intents": [
+    {"name": "nombre_intencion", "confidence": 0.95},
+    {"name": "otra_intencion", "confidence": 0.72}
+  ],
+  "entities": {
+    "tipo_entidad1": "valor1",
+    "tipo_entidad2": "valor2"
+  },
+  "context": {
+    "requires_followup": true/false,
+    "missing_information": ["información_faltante"],
+    "topic": "tema_detectado"
+  }
+}
+
+REGLAS CRÍTICAS:
+- Prioriza PRECISIÓN sobre EXHAUSTIVIDAD
+- No asumas intenciones o entidades sin evidencia clara
+- Utiliza el contexto conversacional para resolver ambigüedades
+- Adapta la detección al dominio específico (ERP, CRM, soporte técnico)
+- Considera modismos y expresiones regionales en español
+- Mantén coherencia entre intenciones y entidades detectadas
+
+Este prompt ha sido optimizado específicamente para el modelo Ollama y está diseñado para maximizar el rendimiento en la detección de patrones lingüísticos complejos en mensajes de usuarios.`,
+        temperature: 0.1, // Temperatura baja para maximizar precisión
+        maxTokens: 800,   // Suficiente para análisis detallado
+        model: process.env.OLLAMA_INTENT_MODEL || process.env.OLLAMA_MODEL || 'llama3:8b',
+        intentCategories: ['nlp', 'detection', 'analysis', 'classification']
+    },
     // Perfil para soporte técnico
     support: {
         systemPrompt: `You are a helpful assistant tasked with providing accurate and contextually precise responses based on retrieved information.
@@ -115,6 +191,12 @@ El sistema mostrará una vista previa que puedes imprimir o exportar a Excel."`,
 
 // Mapeo de intenciones específicas a categorías
 const intentToCategoryMap = {
+    // Categoría para detección de NLP
+    'analizar_intencion': 'nlp_detection',
+    'extraer_entidades': 'nlp_detection',
+    'analisis_semantico': 'nlp_detection',
+    'clasificacion_texto': 'nlp_detection',
+    'deteccion_patron': 'nlp_detection',
     'soporte_tecnico': 'support',
     'queja': 'support',
     'error_sistema': 'support',
@@ -146,7 +228,17 @@ const intentToCategoryMap = {
  * @param {Array<string>} intents - Intenciones detectadas
  * @returns {Object} Perfil de prompt seleccionado
  */
-function getPromptProfileForIntents(intents) {
+function getPromptProfileForIntents(intents, options = {}) {
+    // Si se especifica que es para detección NLP, usar ese perfil directamente
+    if (options.isNlpDetection) {
+        return promptProfiles.nlp_detection;
+    }
+    
+    // Si se especifica un modelo Ollama para intenciones y no hay otras indicaciones
+    if (process.env.OLLAMA_INTENT_MODEL && options.preferOllama) {
+        return promptProfiles.nlp_detection;
+    }
+    
     if (!intents || intents.length === 0) {
         return promptProfiles.general; // Perfil por defecto
     }
@@ -176,5 +268,7 @@ function getPromptProfileForIntents(intents) {
 module.exports = {
     promptProfiles,
     intentToCategoryMap,
-    getPromptProfileForIntents
+    getPromptProfileForIntents,
+    // Función auxiliar para obtener directamente el perfil de detección NLP
+    getNlpDetectionProfile: () => promptProfiles.nlp_detection
 };

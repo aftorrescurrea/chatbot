@@ -1,17 +1,19 @@
 /**
- * Versión mejorada del NLP Service con soporte para perfiles de prompt
- * Integra la selección dinámica de prompts según el tipo de intención
+ * Versión V2 del servicio NLP
+ * Utiliza el servicio especializado de Ollama para detección de intenciones
+ * Mantiene el resto de funcionalidades del servicio original
  */
 
 const { logger } = require('../utils/logger');
-const { PROMPT_SERVICE_VERSION, promptService } = require('../config/migrationConfig');
+const ollamaIntentService = require('./ollamaIntentDetectionService');
 const { getContextForPrompt } = require('./MemoryService');
+const { promptService } = require('../config/migrationConfig');
 const intentService = require('./intentService');
 const entityService = require('./entityService');
-const { getPromptProfileForIntents } = require('../config/promptProfilesConfig');
 
 /**
  * Detecta las intenciones del mensaje del usuario considerando el contexto conversacional
+ * Utiliza el servicio especializado de Ollama para mayor precisión
  * @param {string} message - Mensaje del usuario
  * @param {string} phoneNumber - Número de teléfono del usuario
  * @param {Object} options - Opciones adicionales para la detección de intenciones
@@ -25,37 +27,19 @@ const detectIntentsWithContext = async (message, phoneNumber, options = {}) => {
         // Obtener intenciones desde la base de datos
         const nlpIntents = await intentService.getIntentsForNLP();
         
-        // Configurar variables específicas para este prompt contextual
-        const variables = {
-            supportedIntents: options.supportedIntents || nlpIntents.supportedIntents,
-            intentExamples: options.intentExamples || nlpIntents.intentExamples,
-            conversationExamples: options.conversationExamples || nlpIntents.conversationExamples,
-            serviceType: options.serviceType || 'ERP',
-            context: context
-        };
-
-        // Usar el servicio de prompts para detectar intenciones
-        const result = await promptService.detectIntentionsWithContext(
-            message,
-            context,
-            'contextual-intent-detection',
-            variables
-        );
+        // Usar el servicio especializado para Ollama
+        const result = await ollamaIntentService.detectIntentions(message, context);
         
         // Post-procesamiento usando patrones y relaciones de la base de datos
-        const processedResult = postProcessIntentDetection(message, result, nlpIntents);
-        
-        // Análisis de coherencia contextual
-        const coherenceAnalysis = await analyzeContextualCoherence(message, processedResult.intents, context);
+        const processedResult = ollamaIntentService.postProcessIntentDetection(message, result, nlpIntents);
         
         return {
             ...processedResult,
             context: context,
-            contextStrength: context.contextStrength,
-            coherenceAnalysis: coherenceAnalysis
+            contextStrength: context.contextStrength
         };
     } catch (error) {
-        logger.error(`Error al detectar intenciones con contexto: ${error.message}`);
+        logger.error(`Error al detectar intenciones con contexto usando Ollama: ${error.message}`);
         // Fallback al método sin contexto
         return await detectIntentsBasic(message, options);
     }
@@ -83,7 +67,7 @@ const extractEntitiesWithContext = async (message, phoneNumber, options = {}) =>
             context: context
         };
 
-        // Usar el servicio de prompts para extraer entidades
+        // Usar el servicio de prompts contextual para extraer entidades
         const extractedEntities = await promptService.extractEntitiesWithContext(
             message, 
             context, 
@@ -99,70 +83,6 @@ const extractEntitiesWithContext = async (message, phoneNumber, options = {}) =>
         logger.error(`Error al extraer entidades con contexto: ${error.message}`);
         // Fallback al método sin contexto
         return await extractEntitiesBasic(message, options);
-    }
-};
-
-/**
- * Genera una respuesta basada en las intenciones detectadas utilizando perfiles dinámicos
- * @param {string} message - Mensaje del usuario
- * @param {Array} intents - Intenciones detectadas
- * @param {Object} entities - Entidades extraídas
- * @param {Object} userData - Datos del usuario
- * @param {Object} context - Contexto conversacional
- * @param {Object} options - Opciones adicionales
- * @returns {Promise<string>} - Respuesta generada
- */
-const generateResponseWithProfile = async (message, intents, entities, userData, context, options = {}) => {
-    try {
-        // Verificar si es una intención de crédito para usar el generador especializado
-        const isCreditIntent = intents.some(intent => 
-            ['consultar_saldo_cliente', 'registrar_pago', 'crear_credito', 
-             'ver_clientes_pendientes', 'consultar_reporte_diario', 
-             'buscar_cliente_por_ubicacion'].includes(intent)
-        );
-
-        // Si estamos usando V3 y es una intención de crédito, usar el generador especializado
-        if (PROMPT_SERVICE_VERSION === 'v3' && isCreditIntent && promptService.generateCreditResponse) {
-            logger.info('Usando generador especializado para créditos');
-            
-            // Aquí se podría agregar código para obtener datos de crédito de una API o BD
-            const creditData = {
-                // Datos que se obtendrían de un servicio real
-            };
-            
-            return await promptService.generateCreditResponse(
-                message, 
-                intents, 
-                entities, 
-                creditData, 
-                context
-            );
-        }
-        
-        // Caso general, usar el generador de respuestas con perfil si está disponible
-        if (PROMPT_SERVICE_VERSION === 'v3') {
-            return await promptService.generateResponse(
-                message,
-                intents,
-                entities,
-                userData,
-                context,
-                options
-            );
-        } else {
-            // Versiones anteriores que no tienen perfiles
-            return await promptService.generateResponse(
-                message,
-                intents,
-                entities,
-                userData,
-                context,
-                options
-            );
-        }
-    } catch (error) {
-        logger.error(`Error al generar respuesta con perfil: ${error.message}`);
-        return "Lo siento, estoy teniendo dificultades para procesar tu solicitud en este momento. Por favor, intenta de nuevo más tarde.";
     }
 };
 
@@ -212,14 +132,6 @@ const enrichEntitiesWithContext = (extractedEntities, context, message) => {
         }
     }
     
-    // Enriquecer cliente si no se detectó en el mensaje pero está en contexto
-    if (!enrichedEntities.cliente && knownEntities.cliente) {
-        if (shouldInferEntity(message, 'cliente')) {
-            enrichedEntities.cliente = knownEntities.cliente;
-            logger.debug(`Cliente inferido del contexto: ${knownEntities.cliente}`);
-        }
-    }
-    
     return enrichedEntities;
 };
 
@@ -262,10 +174,6 @@ const shouldInferEntity = (message, entityType) => {
             return hasSelfReference || messageLower.includes('empresa') || messageLower.includes('compañía');
         case 'cargo':
             return hasSelfReference || messageLower.includes('trabajo') || messageLower.includes('puesto');
-        case 'cliente':
-            return hasSelfReference || messageLower.includes('cliente') || 
-                   messageLower.includes('saldo') || messageLower.includes('crédito') || 
-                   messageLower.includes('pago') || hasContinuity;
         default:
             return hasContinuity || hasAction;
     }
@@ -282,19 +190,13 @@ const detectIntentsBasic = async (message, options = {}) => {
         // Obtener intenciones desde la base de datos
         const nlpIntents = await intentService.getIntentsForNLP();
         
-        const variables = {
-            supportedIntents: options.supportedIntents || nlpIntents.supportedIntents,
-            intentExamples: options.intentExamples || nlpIntents.intentExamples,
-            conversationExamples: options.conversationExamples || nlpIntents.conversationExamples,
-            serviceType: options.serviceType || 'ERP'
-        };
-
-        const result = await promptService.detectIntentions(message, 'intent-detection', variables);
+        // Usar servicio Ollama sin contexto
+        const result = await ollamaIntentService.detectIntentions(message, null);
         
         // Aplicar el mismo post-procesamiento basado en datos
-        return postProcessIntentDetection(message, result, nlpIntents);
+        return ollamaIntentService.postProcessIntentDetection(message, result, nlpIntents);
     } catch (error) {
-        logger.error(`Error en detección básica de intenciones: ${error.message}`);
+        logger.error(`Error en detección básica de intenciones con Ollama: ${error.message}`);
         return { intents: [] };
     }
 };
@@ -322,13 +224,7 @@ const extractEntitiesBasic = async (message, options = {}) => {
     }
 };
 
-/**
- * Analiza la coherencia contextual del mensaje con intenciones detectadas
- * @param {string} message - Mensaje del usuario
- * @param {Array} intents - Intenciones detectadas
- * @param {Object} context - Contexto conversacional
- * @returns {Object} - Análisis de coherencia
- */
+// Analiza la coherencia contextual del mensaje con las intenciones detectadas
 const analyzeContextualCoherence = async (message, intents, context) => {
     const analysis = {
         isCoherent: true,
@@ -372,11 +268,7 @@ const analyzeContextualCoherence = async (message, intents, context) => {
     }
 };
 
-/**
- * Obtiene las intenciones relacionadas con un tema específico
- * @param {string} topic - Tema actual
- * @returns {Array} - Intenciones relacionadas
- */
+// Obtiene las intenciones relacionadas con un tema específico
 const getIntentsForTopic = async (topic) => {
     const topicIntentMapping = {
         'trial_request': ['solicitud_prueba', 'confirmacion', 'interes_en_servicio'],
@@ -390,8 +282,6 @@ const getIntentsForTopic = async (topic) => {
         'farewell': ['despedida', 'agradecimiento'],
         'gratitude': ['agradecimiento', 'despedida'],
         'confirmation': ['confirmacion'],
-        'credit_management': ['consultar_saldo_cliente', 'registrar_pago', 'crear_credito', 
-                             'ver_clientes_pendientes', 'consultar_reporte_diario'],
         'general': null
     };
     
@@ -408,12 +298,7 @@ const getIntentsForTopic = async (topic) => {
     return topicIntentMapping[topic] || [];
 };
 
-/**
- * Obtiene la intención principal considerando el contexto
- * @param {Array} intents - Intenciones detectadas
- * @param {Object} context - Contexto conversacional
- * @returns {string} - Intención principal
- */
+// Obtiene la intención primaria considerando el contexto
 const getPrimaryIntentWithContext = async (intents, context) => {
     if (!intents || intents.length === 0) {
         return null;
@@ -442,14 +327,7 @@ const getPrimaryIntentWithContext = async (intents, context) => {
         'confirmacion': 8,
         'agradecimiento': 9,
         'saludo': 10,
-        'despedida': 11,
-        // Prioridades para intenciones de crédito
-        'consultar_saldo_cliente': 3,
-        'registrar_pago': 2,
-        'crear_credito': 1,
-        'ver_clientes_pendientes': 4,
-        'consultar_reporte_diario': 5,
-        'buscar_cliente_por_ubicacion': 6
+        'despedida': 11
     };
 
     const orderedIntents = [...intents].sort((a, b) => {
@@ -461,12 +339,7 @@ const getPrimaryIntentWithContext = async (intents, context) => {
     return orderedIntents[0];
 };
 
-/**
- * Detecta si hay un cambio en el contexto de la conversación
- * @param {Array} currentIntents - Intenciones actuales
- * @param {Object} context - Contexto conversacional
- * @returns {Object} - Información del cambio detectado
- */
+// Detecta cambios en el tema de la conversación
 const detectContextChange = async (currentIntents, context) => {
     const change = {
         hasChanged: false,
@@ -501,17 +374,12 @@ const detectContextChange = async (currentIntents, context) => {
     return change;
 };
 
-/**
- * Calcula la confianza en un cambio de tema
- * @param {Array} intents - Intenciones detectadas
- * @param {Object} context - Contexto conversacional
- * @returns {number} - Nivel de confianza del cambio
- */
+// Calcula la confianza en un cambio de tema
 const calculateTopicChangeConfidence = async (intents, context) => {
     let confidence = 0.5; // Base
     
     // Aumentar confianza si hay intenciones fuertes de cambio
-    const strongChangeIntents = ['solicitud_prueba', 'soporte_tecnico', 'queja', 'cancelacion', 'crear_credito'];
+    const strongChangeIntents = ['solicitud_prueba', 'soporte_tecnico', 'queja', 'cancelacion'];
     if (intents.some(intent => strongChangeIntents.includes(intent))) {
         confidence += 0.3;
     }
@@ -533,80 +401,7 @@ const calculateTopicChangeConfidence = async (intents, context) => {
     return Math.min(Math.max(confidence, 0), 1);
 };
 
-/**
- * Post-procesa los resultados de detección de intenciones usando patrones de la base de datos
- * @param {string} message - Mensaje original del usuario
- * @param {Object} result - Resultado de la detección de intenciones
- * @param {Object} nlpData - Datos de intenciones de la base de datos
- * @returns {Object} - Resultado procesado
- */
-const postProcessIntentDetection = (message, result, nlpData) => {
-    if (!result || !message || !nlpData) return result;
-    
-    // Crear una copia del resultado para no modificar el original
-    const processedResult = { ...result };
-    if (!processedResult.intents) processedResult.intents = [];
-    
-    // Convertir mensaje a minúsculas para comparación
-    const messageLower = message.toLowerCase().trim();
-    
-    // Aplicar detección basada en patrones de la base de datos
-    if (nlpData.detectionPatterns) {
-        Object.entries(nlpData.detectionPatterns).forEach(([intentName, patterns]) => {
-            // Si la intención ya está detectada, no hacer nada
-            if (processedResult.intents.includes(intentName)) return;
-            
-            // Verificar si el mensaje coincide con algún patrón
-            const matchesPattern = patterns.some(pattern =>
-                messageLower.includes(pattern.toLowerCase()));
-            
-            if (matchesPattern) {
-                logger.info(`Detección basada en patrones: Añadiendo '${intentName}' al mensaje "${message}"`);
-                processedResult.intents.push(intentName);
-            }
-        });
-    }
-    
-    // Aplicar relaciones entre intenciones
-    if (nlpData.intentRelationships) {
-        // Hacer una copia de las intenciones detectadas para no modificarlas durante la iteración
-        const detectedIntents = [...processedResult.intents];
-        
-        detectedIntents.forEach(detectedIntent => {
-            const relationships = nlpData.intentRelationships[detectedIntent];
-            
-            if (relationships && Array.isArray(relationships)) {
-                relationships.forEach(relation => {
-                    // Verificar si ya está incluida la intención relacionada
-                    if (processedResult.intents.includes(relation.intent)) return;
-                    
-                    let shouldAdd = false;
-                    
-                    if (relation.condition === 'always') {
-                        shouldAdd = true;
-                    } else if (relation.condition === 'contains' && relation.keywords) {
-                        // Verificar si el mensaje contiene alguna de las palabras clave
-                        shouldAdd = relation.keywords.some(keyword =>
-                            messageLower.includes(keyword.toLowerCase()));
-                    }
-                    
-                    if (shouldAdd) {
-                        logger.info(`Relación de intenciones: Añadiendo '${relation.intent}' basado en '${detectedIntent}'`);
-                        processedResult.intents.push(relation.intent);
-                    }
-                });
-            }
-        });
-    }
-    
-    return processedResult;
-};
-
-/**
- * Determina el tema de conversación basado en las intenciones detectadas
- * @param {Array} intents - Intenciones detectadas
- * @returns {string} - Tema determinado
- */
+// Determina el tema basado en las intenciones detectadas
 const determineTopicFromIntents = (intents) => {
     if (!intents || intents.length === 0) return 'general';
     
@@ -621,62 +416,48 @@ const determineTopicFromIntents = (intents) => {
         'saludo': 'greeting',
         'despedida': 'farewell',
         'agradecimiento': 'gratitude',
-        'confirmacion': 'confirmation',
-        // Mapeo para intenciones de crédito
-        'consultar_saldo_cliente': 'credit_management',
-        'registrar_pago': 'credit_management',
-        'crear_credito': 'credit_management',
-        'ver_clientes_pendientes': 'credit_management',
-        'consultar_reporte_diario': 'credit_management',
-        'buscar_cliente_por_ubicacion': 'credit_management'
+        'confirmacion': 'confirmation'
     };
     
-    // Prioridad de temas (de más a menos específico)
+    // Priorizar por importancia del tema
     const priorityOrder = [
-        'credit_management',
-        'technical_support', 
-        'trial_request', 
-        'complaint', 
-        'cancellation',
-        'pricing_inquiry', 
-        'features_inquiry', 
-        'service_interest',
-        'confirmation', 
-        'farewell', 
-        'gratitude', 
-        'greeting'
+        'solicitud_prueba', 'soporte_tecnico', 'queja', 'cancelacion',
+        'consulta_precio', 'consulta_caracteristicas', 'interes_en_servicio',
+        'confirmacion', 'agradecimiento', 'saludo', 'despedida'
     ];
     
-    // Buscar el tema con la prioridad más alta
-    for (const priority of priorityOrder) {
-        if (intents.some(intent => topicMapping[intent] === priority)) {
-            return priority;
-        }
-    }
-    
-    // Si no hay coincidencia en la prioridad, usar el primer mapeo encontrado
-    for (const intent of intents) {
-        if (topicMapping[intent]) {
-            return topicMapping[intent];
+    for (const intent of priorityOrder) {
+        if (intents.includes(intent)) {
+            return topicMapping[intent] || 'general';
         }
     }
     
     return 'general';
 };
 
+// Información del servicio para configuración
+const CONFIG = {
+    version: 'v2',
+    name: 'NLP Service V2 with Ollama',
+    description: 'Versión mejorada del servicio NLP que utiliza Ollama para detección de intenciones',
+    features: {
+        specializedIntentDetection: true,
+        contextAwareness: true,
+        patternBasedDetection: true
+    }
+};
+
 module.exports = {
+    CONFIG,
     detectIntentsWithContext,
     extractEntitiesWithContext,
     enrichEntitiesWithContext,
-    shouldInferEntity,
-    detectIntentsBasic,
-    extractEntitiesBasic,
     analyzeContextualCoherence,
-    getIntentsForTopic,
     getPrimaryIntentWithContext,
     detectContextChange,
-    calculateTopicChangeConfidence,
-    postProcessIntentDetection,
     determineTopicFromIntents,
-    generateResponseWithProfile
+    calculateTopicChangeConfidence,
+    // Métodos de fallback
+    detectIntentsBasic,
+    extractEntitiesBasic
 };

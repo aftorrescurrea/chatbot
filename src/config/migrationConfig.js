@@ -5,8 +5,9 @@
 
 // Estado de la migración - elegir la versión a utilizar
 const PROMPT_SERVICE_VERSION = process.env.PROMPT_SERVICE_VERSION || 'v1';
+const NLP_SERVICE_VERSION = process.env.NLP_SERVICE_VERSION || 'v1';
 
-// Determinar qué servicio usar según la versión configurada
+// Determinar qué servicio de prompts usar según la versión configurada
 let promptService;
 switch (PROMPT_SERVICE_VERSION) {
     case 'v3':
@@ -20,6 +21,17 @@ switch (PROMPT_SERVICE_VERSION) {
         break;
 }
 
+// Determinar qué servicio NLP usar según la versión configurada
+let nlpService;
+switch (NLP_SERVICE_VERSION) {
+    case 'v2':
+        nlpService = require('../services/nlpServiceV2');
+        break;
+    default:
+        nlpService = require('../services/nlpService');
+        break;
+}
+
 // Configuración adicional para la migración
 const migrationConfig = {
     // Activar logging detallado durante la migración
@@ -27,6 +39,7 @@ const migrationConfig = {
     
     // Comparar resultados entre versiones (útil para validación)
     compareVersions: process.env.COMPARE_PROMPT_VERSIONS === 'true' || false,
+    compareNlpVersions: process.env.COMPARE_NLP_VERSIONS === 'true' || false,
     
     // Límite de historial conversacional (para evitar contextos muy largos)
     maxConversationHistory: 10,
@@ -42,22 +55,46 @@ const migrationConfig = {
         topK: 40
     },
     
+    // Configuración de Ollama para NLP
+    ollamaConfig: {
+        model: process.env.OLLAMA_INTENT_MODEL || process.env.OLLAMA_MODEL || 'llama3:8b',
+        apiUrl: process.env.OLLAMA_API_URL || 'http://localhost:11434',
+        temperature: 0.1
+    },
+    
     // Características específicas de cada versión
     features: {
-        v1: {
-            contextualAwareness: true,
-            templateRendering: true,
-            retryMechanism: true
+        // Servicios de prompt
+        promptServices: {
+            v1: {
+                contextualAwareness: true,
+                templateRendering: true,
+                retryMechanism: true
+            },
+            v2: {
+                chatFormat: true,
+                improvedContextHandling: true,
+                enhancedPrompts: true
+            },
+            v3: {
+                dynamicProfiles: true,
+                intentBasedPrompts: true,
+                domainSpecificResponses: true
+            }
         },
-        v2: {
-            chatFormat: true,
-            improvedContextHandling: true,
-            enhancedPrompts: true
-        },
-        v3: {
-            dynamicProfiles: true,
-            intentBasedPrompts: true,
-            domainSpecificResponses: true
+        // Servicios NLP
+        nlpServices: {
+            v1: {
+                contextualIntentDetection: true,
+                entityExtraction: true,
+                promptBasedProcessing: true
+            },
+            v2: {
+                specializedIntentDetection: true,
+                optimizedPrompts: true,
+                improvedContextHandling: true,
+                ollamaIntegration: true
+            }
         }
     }
 };
@@ -104,9 +141,11 @@ async function checkProfilesSupport() {
 
 module.exports = {
     PROMPT_SERVICE_VERSION,
+    NLP_SERVICE_VERSION,
     migrationConfig,
     getPromptService,
     checkChatAPISupport,
     checkProfilesSupport,
-    promptService // Exportar directamente el servicio configurado
+    promptService, // Exportar directamente el servicio configurado
+    nlpService     // Exportar el servicio NLP configurado
 };
