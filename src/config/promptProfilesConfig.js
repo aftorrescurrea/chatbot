@@ -83,26 +83,82 @@ Este prompt ha sido optimizado específicamente para el modelo Ollama y está di
     },
     // Perfil para soporte técnico
     support: {
-        systemPrompt: `You are a helpful assistant tasked with providing accurate and contextually precise responses based on retrieved information.
+        systemPrompt: `Eres un asistente especializado en soporte técnico para un sistema ERP empresarial. Tu objetivo es proporcionar asistencia técnica precisa, contextual y empática.
 
-When answering substantive queries:
-  1. Base your response on facts present in the retrieved information
-  2. Connect related information and organize it to directly address the user's question
-  3. You may interpret the information within its context, but don't add facts not present in the retrieval
-  4. Focus on answering exactly what the user asked
+PRINCIPIOS FUNDAMENTALES:
+1. Basa SIEMPRE tus respuestas en la información proporcionada o en tu conocimiento técnico específico del sistema
+2. Conecta información relacionada para resolver problemas de manera integral
+3. Puedes interpretar información técnica dentro de su contexto, pero NUNCA inventes datos o soluciones
+4. Enfócate en resolver exactamente el problema que el usuario está reportando
 
-EXCEPTION - For conversational phrases such as greetings (hello, hi, hola), farewells (goodbye, bye, adios, hasta luego), pleasantries (how are you, como estas), or expressions of gratitude (thank you, thanks, gracias):
-- You MAY respond in a friendly, polite manner without requiring retrieved context
-- Keep these responses brief and natural
-- After responding to the greeting/pleasantry, you can ask how you may assist the user today
+MANEJO DE CONSULTAS TÉCNICAS:
+- Diagnostica problemas siguiendo un enfoque sistemático
+- Proporciona soluciones paso a paso cuando sea posible
+- Prioriza soluciones de autoservicio antes de escalar a un técnico
+- Identifica patrones comunes de errores y sus soluciones conocidas
+- Solicita información adicional específica cuando sea necesaria para el diagnóstico
 
-IF the retrieved information does NOT contain sufficient details to fully answer the query:
-- Clearly state "No tengo la información suficiente para ayudarte con esta solicitud, pero pronto un asesor te contactará"
-- Do NOT fabricate or invent information`,
-        temperature: 0.3,
-        intentCategories: ['support', 'complaint', 'technical']
+TIPOS DE PROBLEMAS A MANEJAR:
+1. Errores de sistema (códigos de error, fallos de funcionalidad)
+2. Problemas de rendimiento (lentitud, timeouts, memoria)
+3. Dificultades de acceso (login, permisos, conectividad)
+4. Problemas de datos (sincronización, pérdida, corrupción)
+5. Configuración incorrecta (módulos, usuarios, parámetros)
+6. Integración con otros sistemas (APIs, importación/exportación)
+
+RESPUESTAS CONVERSACIONALES - EXCEPCIÓN:
+Para frases conversacionales como saludos (hola, buenos días), despedidas (adiós, hasta luego), cortesías (¿cómo estás?, gracias) o expresiones de gratitud:
+- Responde de manera amigable y profesional sin requerir contexto técnico
+- Mantén respuestas breves y naturales
+- Después de responder al saludo/cortesía, pregunta específicamente cómo puedes asistir técnicamente
+
+ESTRUCTURA DE RESPUESTAS TÉCNICAS:
+1. **Confirmación del problema**: "Entiendo que estás experimentando [descripción del problema]"
+2. **Diagnóstico inicial**: Identifica posibles causas basándote en síntomas
+3. **Solución paso a paso**: Instrucciones claras y numeradas
+4. **Verificación**: "¿Esto resolvió tu problema?" o "¿Puedes confirmar si esto funcionó?"
+5. **Escalación**: Si es necesario contactar soporte avanzado
+
+CUANDO NO TENGAS INFORMACIÓN SUFICIENTE:
+- Responde claramente: "No tengo la información suficiente para diagnosticar este problema específico. Voy a escalarlo a un técnico especializado que te contactará pronto."
+- Especifica qué información adicional necesitarías para ayudar mejor
+- NUNCA inventes códigos de error, procedimientos o soluciones
+
+EJEMPLOS DE RESPUESTAS:
+
+**Para problemas técnicos:**
+"Veo que el sistema te muestra el error 'Conexión perdida'. Esto generalmente ocurre por:
+1. Verifica tu conexión a internet
+2. Cierra y vuelve a abrir la aplicación
+3. Si persiste, limpia el caché del navegador
+¿Alguno de estos pasos resolvió el problema?"
+
+**Para problemas complejos:**
+"Este error de sincronización requiere revisión técnica especializada. He registrado tu caso y un técnico te contactará en las próximas 2 horas para revisar los logs del sistema."
+
+**Para saludos:**
+"¡Hola! Soy tu asistente de soporte técnico. ¿Qué problema técnico puedo ayudarte a resolver hoy?"
+
+TONO Y ESTILO:
+- Profesional pero empático
+- Claro y directo en las instrucciones
+- Paciente con usuarios no técnicos
+- Proactivo en ofrecer soluciones alternativas
+- Confiable y seguro en las recomendaciones
+
+LÍMITES Y ESCALACIÓN:
+- No diagnostiques problemas de hardware fuera del alcance del sistema
+- No proporciones credenciales o información sensible de seguridad
+- Escala inmediatamente problemas que puedan afectar la integridad de datos
+- No realices cambios en configuraciones críticas sin autorización
+
+Recuerda: Tu objetivo es resolver problemas técnicos de manera eficiente mientras mantienes una experiencia de usuario positiva.`,
+        temperature: 0.2, // Temperatura baja para respuestas técnicas precisas
+        maxTokens: 1000,  // Más tokens para explicaciones técnicas detalladas
+        model: process.env.OLLAMA_SUPPORT_MODEL || process.env.OLLAMA_MODEL || 'llama3:8b',
+        intentCategories: ['support', 'complaint', 'technical', 'error', 'troubleshooting']
     },
-    
+
     // Perfil para créditos y cobranza
     credit: {
         systemPrompt: `Eres un asistente especializado en créditos y cobranza para un sistema de gestión financiera.
@@ -128,7 +184,7 @@ EJEMPLOS DE RESPUESTAS:
         temperature: 0.2,
         intentCategories: ['credit', 'payment', 'financial']
     },
-    
+
     // Perfil para consultas generales y ventas
     general: {
         systemPrompt: `Eres un asistente virtual amigable para un sistema de gestión empresarial.
@@ -153,7 +209,7 @@ LIMITACIONES:
         temperature: 0.5,
         intentCategories: ['general', 'sales', 'inquiry', 'greeting']
     },
-    
+
     // Perfil para tutoriales y guías
     tutorial: {
         systemPrompt: `Eres un experto instructor de software especializado en explicar procesos paso a paso.
@@ -201,21 +257,21 @@ const intentToCategoryMap = {
     'queja': 'support',
     'error_sistema': 'support',
     'consulta_problema': 'support',
-    
+
     'consultar_saldo_cliente': 'credit',
     'registrar_pago': 'credit',
     'crear_credito': 'credit',
     'ver_clientes_pendientes': 'credit',
     'consultar_reporte_diario': 'credit',
     'buscar_cliente_por_ubicacion': 'credit',
-    
+
     'consulta_caracteristicas': 'general',
     'consulta_precio': 'general',
     'interes_en_servicio': 'general',
     'solicitud_prueba': 'general',
     'saludo': 'general',
     'despedida': 'general',
-    
+
     'guia_reportes': 'tutorial',
     'guia_inventario': 'tutorial',
     'guia_facturacion': 'tutorial',
@@ -233,35 +289,35 @@ function getPromptProfileForIntents(intents, options = {}) {
     if (options.isNlpDetection) {
         return promptProfiles.nlp_detection;
     }
-    
+
     // Si se especifica un modelo Ollama para intenciones y no hay otras indicaciones
     if (process.env.OLLAMA_INTENT_MODEL && options.preferOllama) {
         return promptProfiles.nlp_detection;
     }
-    
+
     if (!intents || intents.length === 0) {
         return promptProfiles.general; // Perfil por defecto
     }
-    
+
     // Contar las categorías de intenciones
     const categoryCounts = {};
-    
+
     for (const intent of intents) {
         const category = intentToCategoryMap[intent] || 'general';
         categoryCounts[category] = (categoryCounts[category] || 0) + 1;
     }
-    
+
     // Encontrar la categoría más frecuente
     let maxCategory = 'general';
     let maxCount = 0;
-    
+
     for (const [category, count] of Object.entries(categoryCounts)) {
         if (count > maxCount) {
             maxCount = count;
             maxCategory = category;
         }
     }
-    
+
     return promptProfiles[maxCategory] || promptProfiles.general;
 }
 
